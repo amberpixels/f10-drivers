@@ -104,7 +104,6 @@ type Page struct {
 type Property struct {
 	Type        string     `json:"type"`
 	Title       []RichText `json:"title"`
-	RichText    []RichText `json:"rich_text"`
 	UniqueID    *UniqueID  `json:"unique_id"`
 	Status      *Option    `json:"status"`
 	Select      *Option    `json:"select"`

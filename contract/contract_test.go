@@ -9,7 +9,8 @@ import (
 	"github.com/amberpixels/f10-drivers/contract"
 )
 
-// stub answers every verb with nothing, the way an empty tracker would.
+// stub is a tracker with no tasks: fixed text and urls, empty rows, and
+// branch declined.
 type stub struct{}
 
 func (stub) Read(context.Context, string) (string, error) { return "# body", nil }
