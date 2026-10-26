@@ -234,7 +234,8 @@ func (c *Client) Comments(ctx context.Context, pageID string) ([]Comment, error)
 	}
 }
 
-// do sends one request, retrying a 429 a few times after Retry-After.
+// do sends one request, retrying a 429 or a transient 5xx a few times after
+// Retry-After. Every call it makes is a read, so a retry is safe.
 func (c *Client) do(ctx context.Context, method, path string, query url.Values, body, out any) error {
 	var payload []byte
 
@@ -275,7 +276,7 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 			return fmt.Errorf("notion: %w", err)
 		}
 
-		if resp.StatusCode == http.StatusTooManyRequests && attempt < maxRetries {
+		if retryable(resp.StatusCode) && attempt < maxRetries {
 			if err := sleep(ctx, retryAfter(resp.Header.Get("Retry-After"))); err != nil {
 				return err
 			}
@@ -295,6 +296,16 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 		}
 
 		return nil
+	}
+}
+
+func retryable(status int) bool {
+	switch status {
+	case http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway,
+		http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
 	}
 }
 
