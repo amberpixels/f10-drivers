@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strings"
 
 	"github.com/amberpixels/f10-drivers/config"
@@ -22,6 +23,7 @@ import (
 )
 
 const usage = `usage: f10-drivers <tracker> [--config <path>] <verb> [argument]
+       f10-drivers --version
 
 trackers: notion
 verbs:    read, url, search, branch, children, index, list
@@ -57,6 +59,16 @@ func testAPI(env string) (string, error) {
 	return v, nil
 }
 
+// version is the module version Go stamps into the build: the tag for a
+// tagged checkout or `go install ...@v0.1.0`, a pseudo-version past it.
+func version() string {
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		return info.Main.Version
+	}
+
+	return "dev"
+}
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	code := run(ctx, os.Args[1:], os.Stdout, os.Stderr)
@@ -66,6 +78,12 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	if len(args) == 1 && args[0] == "--version" {
+		_, _ = fmt.Fprintln(stdout, "f10-drivers", version())
+
+		return 0
+	}
+
 	inv, err := parseArgs(args)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "f10-drivers: %v\n\n%s\n", err, usage)

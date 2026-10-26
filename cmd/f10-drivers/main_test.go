@@ -233,6 +233,13 @@ func TestUsage(t *testing.T) {
 	}
 }
 
+func TestVersion(t *testing.T) {
+	res := conformance.Command(binary, t.TempDir())(t, "--version")
+	if res.Code != 0 || !strings.HasPrefix(res.Stdout, "f10-drivers ") {
+		t.Fatalf("want exit 0 with the version, got %d, %q", res.Code, res.Stdout)
+	}
+}
+
 func golden(t *testing.T, name, got string) {
 	t.Helper()
 
