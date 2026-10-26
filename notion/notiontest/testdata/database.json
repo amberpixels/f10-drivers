@@ -1,0 +1,16 @@
+{
+ "object": "database",
+ "id": "1a2b3c4d-0000-4000-8000-00000000db01",
+ "url": "https://www.notion.so/1a2b3c4d00004000800000000000db01",
+ "title": [
+  {
+   "plain_text": "Marketing tasks"
+  }
+ ],
+ "data_sources": [
+  {
+   "id": "1a2b3c4d-0000-4000-8000-00000000d501",
+   "name": "Marketing tasks"
+  }
+ ]
+}

@@ -1,0 +1,397 @@
+[
+ {
+  "object": "page",
+  "id": "2b000000-0000-4000-8000-000000000001",
+  "created_time": "2026-10-01T09:00:00.000Z",
+  "url": "https://www.notion.so/Set-up-the-weekly-report-template-2b000000000040008000000000000001",
+  "parent": {
+   "type": "data_source_id",
+   "data_source_id": "1a2b3c4d-0000-4000-8000-00000000d501",
+   "database_id": "1a2b3c4d-0000-4000-8000-00000000db01"
+  },
+  "properties": {
+   "Name": {
+    "id": "title",
+    "type": "title",
+    "title": [
+     {
+      "type": "text",
+      "plain_text": "Set up the weekly report template"
+     }
+    ]
+   },
+   "ID": {
+    "id": "a",
+    "type": "unique_id",
+    "unique_id": {
+     "prefix": "MKT",
+     "number": 1
+    }
+   },
+   "Status": {
+    "id": "b",
+    "type": "status",
+    "status": {
+     "id": "x",
+     "name": "Done",
+     "color": "default"
+    }
+   },
+   "Priority": {
+    "id": "c",
+    "type": "select",
+    "select": {
+     "id": "x",
+     "name": "Low",
+     "color": "default"
+    }
+   },
+   "Assignee": {
+    "id": "d",
+    "type": "people",
+    "people": []
+   },
+   "Tags": {
+    "id": "e",
+    "type": "multi_select",
+    "multi_select": [
+     {
+      "id": "x",
+      "name": "report",
+      "color": "default"
+     }
+    ]
+   },
+   "Parent": {
+    "id": "f",
+    "type": "relation",
+    "relation": [],
+    "has_more": false
+   },
+   "Blocked by": {
+    "id": "g",
+    "type": "relation",
+    "relation": [],
+    "has_more": false
+   }
+  }
+ },
+ {
+  "object": "page",
+  "id": "2b000000-0000-4000-8000-000000000002",
+  "created_time": "2026-10-12T10:30:00.000Z",
+  "url": "https://www.notion.so/Draft-the-Q4-campaign-summary-2b000000000040008000000000000002",
+  "parent": {
+   "type": "data_source_id",
+   "data_source_id": "1a2b3c4d-0000-4000-8000-00000000d501",
+   "database_id": "1a2b3c4d-0000-4000-8000-00000000db01"
+  },
+  "properties": {
+   "Name": {
+    "id": "title",
+    "type": "title",
+    "title": [
+     {
+      "type": "text",
+      "plain_text": "Draft the Q4 campaign summary"
+     }
+    ]
+   },
+   "ID": {
+    "id": "a",
+    "type": "unique_id",
+    "unique_id": {
+     "prefix": "MKT",
+     "number": 2
+    }
+   },
+   "Status": {
+    "id": "b",
+    "type": "status",
+    "status": {
+     "id": "x",
+     "name": "In progress",
+     "color": "default"
+    }
+   },
+   "Priority": {
+    "id": "c",
+    "type": "select",
+    "select": {
+     "id": "x",
+     "name": "High",
+     "color": "default"
+    }
+   },
+   "Assignee": {
+    "id": "d",
+    "type": "people",
+    "people": [
+     {
+      "object": "user",
+      "id": "u1",
+      "name": "Ann Lee"
+     }
+    ]
+   },
+   "Tags": {
+    "id": "e",
+    "type": "multi_select",
+    "multi_select": [
+     {
+      "id": "x",
+      "name": "report",
+      "color": "default"
+     }
+    ]
+   },
+   "Parent": {
+    "id": "f",
+    "type": "relation",
+    "relation": [],
+    "has_more": false
+   },
+   "Blocked by": {
+    "id": "g",
+    "type": "relation",
+    "relation": [],
+    "has_more": false
+   }
+  }
+ },
+ {
+  "object": "page",
+  "id": "2b000000-0000-4000-8000-000000000003",
+  "created_time": "2026-10-12T10:31:00.000Z",
+  "url": "https://www.notion.so/Collect-channel-metrics-2b000000000040008000000000000003",
+  "parent": {
+   "type": "data_source_id",
+   "data_source_id": "1a2b3c4d-0000-4000-8000-00000000d501",
+   "database_id": "1a2b3c4d-0000-4000-8000-00000000db01"
+  },
+  "properties": {
+   "Name": {
+    "id": "title",
+    "type": "title",
+    "title": [
+     {
+      "type": "text",
+      "plain_text": "Collect channel metrics"
+     }
+    ]
+   },
+   "ID": {
+    "id": "a",
+    "type": "unique_id",
+    "unique_id": {
+     "prefix": "MKT",
+     "number": 3
+    }
+   },
+   "Status": {
+    "id": "b",
+    "type": "status",
+    "status": {
+     "id": "x",
+     "name": "Not started",
+     "color": "default"
+    }
+   },
+   "Priority": {
+    "id": "c",
+    "type": "select",
+    "select": {
+     "id": "x",
+     "name": "Urgent",
+     "color": "default"
+    }
+   },
+   "Assignee": {
+    "id": "d",
+    "type": "people",
+    "people": []
+   },
+   "Tags": {
+    "id": "e",
+    "type": "multi_select",
+    "multi_select": [
+     {
+      "id": "x",
+      "name": "data",
+      "color": "default"
+     }
+    ]
+   },
+   "Parent": {
+    "id": "f",
+    "type": "relation",
+    "relation": [
+     {
+      "id": "2b000000-0000-4000-8000-000000000002"
+     }
+    ],
+    "has_more": false
+   },
+   "Blocked by": {
+    "id": "g",
+    "type": "relation",
+    "relation": [
+     {
+      "id": "2b000000-0000-4000-8000-000000000001"
+     }
+    ],
+    "has_more": false
+   }
+  }
+ },
+ {
+  "object": "page",
+  "id": "2b000000-0000-4000-8000-000000000004",
+  "created_time": "2026-10-12T10:32:00.000Z",
+  "url": "https://www.notion.so/Write-the-summary-narrative-2b000000000040008000000000000004",
+  "parent": {
+   "type": "data_source_id",
+   "data_source_id": "1a2b3c4d-0000-4000-8000-00000000d501",
+   "database_id": "1a2b3c4d-0000-4000-8000-00000000db01"
+  },
+  "properties": {
+   "Name": {
+    "id": "title",
+    "type": "title",
+    "title": [
+     {
+      "type": "text",
+      "plain_text": "Write the summary narrative"
+     }
+    ]
+   },
+   "ID": {
+    "id": "a",
+    "type": "unique_id",
+    "unique_id": {
+     "prefix": "MKT",
+     "number": 4
+    }
+   },
+   "Status": {
+    "id": "b",
+    "type": "status",
+    "status": {
+     "id": "x",
+     "name": "Not started",
+     "color": "default"
+    }
+   },
+   "Priority": {
+    "id": "c",
+    "type": "select",
+    "select": {
+     "id": "x",
+     "name": "Someday",
+     "color": "default"
+    }
+   },
+   "Assignee": {
+    "id": "d",
+    "type": "people",
+    "people": []
+   },
+   "Tags": {
+    "id": "e",
+    "type": "multi_select",
+    "multi_select": []
+   },
+   "Parent": {
+    "id": "f",
+    "type": "relation",
+    "relation": [
+     {
+      "id": "2b000000-0000-4000-8000-000000000002"
+     }
+    ],
+    "has_more": false
+   },
+   "Blocked by": {
+    "id": "g",
+    "type": "relation",
+    "relation": [
+     {
+      "id": "2b000000-0000-4000-8000-000000000003"
+     }
+    ],
+    "has_more": false
+   }
+  }
+ },
+ {
+  "object": "page",
+  "id": "2b000000-0000-4000-8000-000000000005",
+  "created_time": "2026-10-12T10:33:00.000Z",
+  "url": "https://www.notion.so/Pick-the-cover-image-2b000000000040008000000000000005",
+  "parent": {
+   "type": "data_source_id",
+   "data_source_id": "1a2b3c4d-0000-4000-8000-00000000d501",
+   "database_id": "1a2b3c4d-0000-4000-8000-00000000db01"
+  },
+  "properties": {
+   "Name": {
+    "id": "title",
+    "type": "title",
+    "title": [
+     {
+      "type": "text",
+      "plain_text": "Pick the cover image"
+     }
+    ]
+   },
+   "ID": {
+    "id": "a",
+    "type": "unique_id",
+    "unique_id": {
+     "prefix": "MKT",
+     "number": 5
+    }
+   },
+   "Status": {
+    "id": "b",
+    "type": "status",
+    "status": {
+     "id": "x",
+     "name": "Done",
+     "color": "default"
+    }
+   },
+   "Priority": {
+    "id": "c",
+    "type": "select",
+    "select": null
+   },
+   "Assignee": {
+    "id": "d",
+    "type": "people",
+    "people": []
+   },
+   "Tags": {
+    "id": "e",
+    "type": "multi_select",
+    "multi_select": []
+   },
+   "Parent": {
+    "id": "f",
+    "type": "relation",
+    "relation": [
+     {
+      "id": "2b000000-0000-4000-8000-000000000002"
+     }
+    ],
+    "has_more": false
+   },
+   "Blocked by": {
+    "id": "g",
+    "type": "relation",
+    "relation": [],
+    "has_more": false
+   }
+  }
+ }
+]

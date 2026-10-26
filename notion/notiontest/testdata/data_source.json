@@ -1,0 +1,85 @@
+{
+ "object": "data_source",
+ "id": "1a2b3c4d-0000-4000-8000-00000000d501",
+ "parent": {
+  "type": "database_id",
+  "database_id": "1a2b3c4d-0000-4000-8000-00000000db01"
+ },
+ "properties": {
+  "Name": {
+   "id": "N",
+   "name": "Name",
+   "type": "title"
+  },
+  "ID": {
+   "id": "I",
+   "name": "ID",
+   "type": "unique_id",
+   "unique_id": {
+    "prefix": "MKT"
+   }
+  },
+  "Status": {
+   "id": "S",
+   "name": "Status",
+   "type": "status",
+   "status": {
+    "options": [
+     {
+      "name": "Not started"
+     },
+     {
+      "name": "In progress"
+     },
+     {
+      "name": "Done"
+     }
+    ]
+   }
+  },
+  "Priority": {
+   "id": "P",
+   "name": "Priority",
+   "type": "select",
+   "select": {
+    "options": [
+     {
+      "name": "Urgent"
+     },
+     {
+      "name": "High"
+     },
+     {
+      "name": "Medium"
+     },
+     {
+      "name": "Low"
+     },
+     {
+      "name": "Someday"
+     }
+    ]
+   }
+  },
+  "Assignee": {
+   "id": "A",
+   "name": "Assignee",
+   "type": "people"
+  },
+  "Tags": {
+   "id": "T",
+   "name": "Tags",
+   "type": "multi_select"
+  },
+  "Parent": {
+   "id": "P",
+   "name": "Parent",
+   "type": "relation"
+  },
+  "Blocked by": {
+   "id": "B",
+   "name": "Blocked by",
+   "type": "relation"
+  }
+ }
+}
