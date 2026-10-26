@@ -25,24 +25,25 @@ const DefaultBranch = "{id}/{slug}"
 // Config is one project's driver.toml.
 type Config struct {
 	Prefix string  `toml:"prefix"` // the task id prefix: "MKT" makes "MKT-12"
-	Branch string  `toml:"branch"` // a template over {id}, {number} and {slug}
+	Branch string  `toml:"branch"` // a template over {id}, {number} and {slug}; DefaultBranch when empty
 	Notion *Notion `toml:"notion"`
 
-	Path string `toml:"-"`
+	Path string `toml:"-"` // the file Load read, for error messages
 }
 
 // Notion is the [notion] table.
 type Notion struct {
-	TokenEnv   string                `toml:"token_env"`
+	TokenEnv   string                `toml:"token_env"`   // the env var holding the token, NOTION_TOKEN by default
 	Database   string                `toml:"database"`    // a database id or url
 	DataSource string                `toml:"data_source"` // set when the database has several
-	Done       []string              `toml:"done"`        // statuses that close a task
+	Done       []string              `toml:"done"`        // statuses that close a task, ["Done"] by default
 	Properties Properties            `toml:"properties"`
 	Priority   map[string]StringList `toml:"priority"` // contract level to the tracker's values
 }
 
 // Properties names the Notion properties each row field reads from.
-// ID is required; an empty one is a field the database does not have.
+// ID is required; an empty Title is found in the schema; any other empty one
+// is a field the database does not have.
 type Properties struct {
 	ID       string `toml:"id"`
 	Title    string `toml:"title"`
