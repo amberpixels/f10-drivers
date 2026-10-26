@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 362 134" width="362" height="134" xml:space="preserve">
+  <style>
+    text { font-family: 'Menlo','Consolas','DejaVu Sans Mono',monospace; font-size: 26px; font-weight: 700; white-space: pre; }
+  </style>
+  <rect width="362" height="134" fill="transparent"/>
+  <!-- F10: f10's own glyphs and stage colors -->
+  <text x="8" y="26"><tspan fill="#F59E0B">░█▀▀</tspan> <tspan fill="#8B5CF6">░▄█░</tspan> <tspan fill="#10B981">░█▀█</tspan></text>
+  <text x="8" y="48"><tspan fill="#F59E0B">░█▀▀</tspan> <tspan fill="#8B5CF6">░░█░</tspan> <tspan fill="#10B981">░█░█</tspan></text>
+  <text x="8" y="70"><tspan fill="#F59E0B">░▀░░</tspan> <tspan fill="#8B5CF6">░▀▀▀</tspan> <tspan fill="#10B981">░▀▀▀</tspan></text>
+  <!-- DRIVERS (smaller, shifted) -->
+  <text x="48" y="94" fill="#0EA5E9" style="font-size:18px">░█▀▄░█▀▄░▀█▀░█░█░█▀▀░█▀▄░█▀▀</text>
+  <text x="48" y="109" fill="#0EA5E9" style="font-size:18px">░█░█░█▀▄░░█░░█░█░█▀▀░█▀▄░▀▀█</text>
+  <text x="48" y="124" fill="#0EA5E9" style="font-size:18px">░▀▀░░▀░▀░▀▀▀░░▀░░▀▀▀░▀░▀░▀▀▀</text>
+</svg>

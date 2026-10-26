@@ -1,6 +1,8 @@
-<div align="center">
+<p align="center">
+  <img src="logo.svg" alt="f10-drivers" width="362">
+</p>
 
-### f10-drivers
+<div align="center">
 
 Tracker drivers for [f10](https://github.com/amberpixels/f10), configured per project instead of written per project.
 
