@@ -16,8 +16,9 @@ import (
 )
 
 // APIVersion is the Notion-Version this client speaks: databases hold data
-// sources, and queries go to the data source.
-const APIVersion = "2025-09-03"
+// sources (since 2025-09-03), queries go to the data source, and a trashed
+// object reads in_trash, not archived.
+const APIVersion = "2026-03-11"
 
 // DefaultBaseURL is Notion's API root.
 const DefaultBaseURL = "https://api.notion.com/v1"
