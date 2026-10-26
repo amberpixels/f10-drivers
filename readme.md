@@ -11,7 +11,8 @@ Tracker drivers for [f10](https://github.com/amberpixels/f10), configured per pr
 ---
 
 f10 reaches GitHub and GitLab issues through `gh` and `glab`.
-Any other tracker goes through an executable at `.f10/driver` that answers f10's [driver contract](https://github.com/amberpixels/f10/blob/main/docs/driver-contract.md): seven verbs, data on stdout, exit 3 for a verb it does not implement.
+Any other tracker goes through an executable at `.f10/driver` that answers f10's [driver contract](https://github.com/amberpixels/f10/blob/main/docs/driver-contract.md).
+The contract is seven verbs, data on stdout, and exit 3 for a verb the driver does not implement.
 
 `f10-drivers` implements that contract once per tracker.
 A project carries a one-line shim and a small TOML file, and no code.
@@ -52,7 +53,8 @@ tracker:
 ```
 
 Creating tasks is not a driver verb.
-It stays with the **Create** adapter under `## Tracker` in `project.md`; the Notion MCP connector fits it, since Notion takes blocks, not a markdown string.
+It stays with the **Create** adapter under `## Tracker` in `project.md`.
+The Notion MCP connector suits it, since Notion takes blocks, not a markdown string.
 
 ## Notion
 
@@ -93,7 +95,13 @@ low = "Low"
 ```
 
 Every key but `prefix`, `notion.database` (or `notion.data_source`) and `notion.properties.id` is optional.
-An unknown key, a priority level outside `urgent`, `high`, `medium`, `low`, a property the database does not have, one of the wrong type, a `done` value that is not an option of the status property, or a `prefix` other than the one Notion gives the Unique ID property fails with a message naming it.
+The driver fails with a message naming the problem on:
+
+- an unknown key
+- a priority level outside `urgent`, `high`, `medium`, `low`
+- a property the database does not have, or one of the wrong type
+- a `done` value that is not an option of the status property
+- a `prefix` other than the one Notion gives the Unique ID property
 
 ### What each verb answers
 
@@ -113,8 +121,11 @@ A body Notion cuts short, or blocks it cannot render, gets a line in the answer 
 
 ## Conformance
 
-`conformance.Check` runs every verb through a driver's process boundary and checks each answer against the contract: one line for a url or a branch, a JSON array of rows with the required fields, priorities in the vocabulary, RFC 3339 times, exit 3 for a declined verb, a non-zero exit with stderr for a missing task.
-The Notion driver runs it against a fake Notion API (`notion/notiontest`) through the same shim a project uses; a new tracker passes its own fixtures to the same check.
+`conformance.Check` runs every verb through a driver's process boundary and checks each answer against the contract.
+It wants one line for a url or a branch, a JSON array of rows with the required fields, priorities in the vocabulary and RFC 3339 times.
+A declined verb must exit 3; a missing task must exit non-zero with stderr.
+The Notion driver runs it against a fake Notion API (`notion/notiontest`) through the same shim a project uses.
+A new tracker passes its own fixtures to the same check.
 
 ## Development
 
