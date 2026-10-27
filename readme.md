@@ -20,7 +20,7 @@ A project carries a one-line shim and a TOML file, no code.
 
 | tracker | verbs |
 |---|---|
-| Notion, REST API | `read`, `url`, `search`, `list`, `index`, `branch`, `children`, `create` |
+| Notion, REST API | `read`, `url`, `search`, `list`, `index`, `branch`, `children`, `create`, `comment`, `update` |
 | Notion, hosted MCP server | the same |
 
 ## Install
@@ -93,6 +93,7 @@ assignee = "Assignee"             # people
 labels = "Tags"                   # multi_select or select
 parent = "Parent task"            # relation; without it, children declines
 after = "Blocked by"              # relation; the task this one waits for
+result = "Result"                 # any other key: a property update --set <key>=<value> writes
 
 [notion.priority]                 # extra option names per level
 high = ["High", "P1"]
@@ -113,11 +114,22 @@ The driver checks the config against the database: unknown keys, missing or mist
 | `branch <n>` | the `branch` template, filled |
 | `children <n>` | tasks whose `parent` is this one |
 | `create` | the new task's id, from `# <title>` and a markdown body on stdin |
+| `comment <n>` | the new comment's id, from markdown on stdin, posted as a page comment |
+| `update <n>` | the task's id, after setting the properties its flags name |
 
 `create` takes `--status`, `--label`, `--priority <level>`, `--parent <n>` and `--after <n>`, mapped through `[notion.properties]`.
 Values are checked against the schema before the page is made; unknown or unconfigured flags are dropped with a warning.
 It is one request, retried only on a 429: after a 5xx or a lost connection, check the database before running it again.
 Over the API, read verbs also retry a transient 5xx.
+
+`update` takes the same `--status`, `--label` and `--priority <level>`, plus `--assignee <email|name>` and `--set <key>=<value>` for any other key under `[notion.properties]`: a url, text, number, checkbox (`true`/`false`), date (`YYYY-MM-DD` or RFC 3339), select, status, email or phone property.
+`--label` replaces the task's labels, `--assignee` replaces its people, and an empty `--set <key>=` clears the property.
+Every value is checked before the request, and unlike `create`, an unknown or unconfigured flag fails the update with nothing sent.
+The values are absolute, so `update` retries a 429 and a transient 5xx like a read.
+Over the API, `--assignee <email>` needs the integration's "read user information including email addresses" capability; a name matching several users fails naming them.
+
+`comment` keeps paragraphs, links, bold, italic, strikethrough and inline code; headings, quotes, lists, tables and code blocks become plain text.
+Like `create`, it is one request, retried only on a 429: after a 5xx or a lost connection, check the task's comments before running it again.
 
 ### Over MCP
 
@@ -132,7 +144,7 @@ On both transports, images stay links (f10 downloads them), a truncated body get
 
 ## Conformance
 
-`conformance.Check` runs every verb through a driver's process boundary and checks each answer against the contract, including a `create` followed by a `read`, so point it at a fake or a scratch database.
+`conformance.Check` runs every verb through a driver's process boundary and checks each answer against the contract, including a `create`, a `comment` and an `update`, each followed by a `read`, so point it at a fake or a scratch database.
 The Notion driver passes it over both transports, against the fakes in `notion/notiontest`. A new tracker passes its own fixtures to the same check.
 
 ## Development

@@ -171,3 +171,105 @@ func TestServeCreateRejects(t *testing.T) {
 		})
 	}
 }
+
+// writer is a stub that implements comment and update and keeps what it
+// was given.
+type writer struct {
+	stub
+
+	comment string
+	update  contract.TaskUpdate
+	called  bool
+}
+
+func (w *writer) Comment(_ context.Context, _, md string) (string, error) {
+	w.comment, w.called = md, true
+
+	return "c1", nil
+}
+
+func (w *writer) Update(_ context.Context, number string, u contract.TaskUpdate) (string, error) {
+	w.update, w.called = u, true
+
+	return "MKT-" + number, nil
+}
+
+func TestServeComment(t *testing.T) {
+	w := &writer{}
+
+	var out bytes.Buffer
+
+	err := contract.Serve(t.Context(), w, "comment", []string{"2"}, strings.NewReader("Done: **all** of it.\n\n"), &out)
+	if err != nil || out.String() != "c1\n" || w.comment != "Done: **all** of it." {
+		t.Fatalf("err = %v, stdout = %q, comment = %q", err, out.String(), w.comment)
+	}
+}
+
+func TestServeUpdate(t *testing.T) {
+	w := &writer{}
+
+	var out bytes.Buffer
+
+	args := []string{
+		"2", "--status", "Done", "--priority", "low", "--label", "a", "--label", "b",
+		"--assignee", "ann@example.com", "--set", "result=https://x.test/r?a=b", "--set", "due=",
+	}
+
+	if err := contract.Serve(t.Context(), w, "update", args, nil, &out); err != nil || out.String() != "MKT-2\n" {
+		t.Fatalf("err = %v, stdout = %q", err, out.String())
+	}
+
+	u := w.update
+	if u.Status != "Done" || u.Priority != "low" || strings.Join(u.Labels, ",") != "a,b" ||
+		u.Assignee != "ann@example.com" || len(u.Set) != 2 ||
+		u.Set[0] != (contract.KeyValue{Key: "result", Value: "https://x.test/r?a=b"}) ||
+		u.Set[1] != (contract.KeyValue{Key: "due", Value: ""}) {
+		t.Fatalf("update = %+v", u)
+	}
+}
+
+func TestServeWritesReject(t *testing.T) {
+	for _, tc := range []struct {
+		name, verb, stdin, want string
+		args                    []string
+	}{
+		{"empty comment", "comment", " \n", "got none", []string{"2"}},
+		{"comment flag", "comment", "x", "takes only a task number", []string{"2", "--status", "Done"}},
+		{"comment id", "comment", "x", "needs a task number", []string{"MKT-2"}},
+		{"empty update", "update", "", "update sets nothing", []string{"2"}},
+		{"unknown flag", "update", "", "flag provided but not defined: -type", []string{"2", "--type", "bug"}},
+		{"positional", "update", "", `got "x"`, []string{"2", "--status", "Done", "x"}},
+		{"bad priority", "update", "", `--priority "p1" is not one of`, []string{"2", "--priority", "p1"}},
+		{"set without =", "update", "", `want key=value, got "due"`, []string{"2", "--set", "due"}},
+		{"set twice", "update", "", "due is set twice", []string{"2", "--set", "due=a", "--set", "due=b"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := &writer{}
+
+			err := contract.Serve(t.Context(), w, tc.verb, tc.args, strings.NewReader(tc.stdin), &bytes.Buffer{})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want one containing %q", err, tc.want)
+			}
+
+			if w.called {
+				t.Fatal("the tracker was called")
+			}
+		})
+	}
+}
+
+func TestServeWritesDeclineWithoutTheInterface(t *testing.T) {
+	for _, verb := range []string{"comment", "update"} {
+		err := contract.Serve(
+			t.Context(),
+			stub{},
+			verb,
+			[]string{"2", "--status", "Done"},
+			strings.NewReader("x"),
+			&bytes.Buffer{},
+		)
+		if !errors.Is(err, contract.ErrUnsupported) {
+			t.Errorf("%s: err = %v, want ErrUnsupported", verb, err)
+		}
+	}
+}

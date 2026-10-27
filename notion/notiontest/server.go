@@ -6,6 +6,7 @@ package notiontest
 import (
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -43,6 +44,12 @@ type Server struct {
 	// nothing.
 	CreateStatus int
 
+	// UpdateStatus and CommentStatus, when set, are the status the first
+	// update or comment request answers, changing nothing; later ones are
+	// served.
+	UpdateStatus  int
+	CommentStatus int
+
 	// RowLimit caps every rows-mode answer of the MCP face, which has no
 	// cursor, so a test can make it answer has_more.
 	RowLimit int
@@ -50,14 +57,17 @@ type Server struct {
 	// Protocol, when set, is the MCP version initialize answers.
 	Protocol string
 
-	mu       sync.Mutex // guards pages, markdown and creates, which create writes, and the MCP face's state
+	mu       sync.Mutex // guards pages, markdown and the counters, which writes change, and the MCP face's state
 	creates  int
+	updates  int
+	posts    int
 	oauth    oauthState
 	calls    map[string]int
 	session  string
 	sessions int
 	pages    []page
 	comments map[string][]any
+	people   []any
 	markdown map[string]any
 	database any
 	source   any
@@ -76,6 +86,7 @@ func New(t *testing.T) *Server {
 	}
 	load(t, "pages.json", &s.pages)
 	load(t, "comments.json", &s.comments)
+	load(t, "users.json", &s.people)
 	load(t, "markdown.json", &s.markdown)
 	load(t, "database.json", &s.database)
 	load(t, "data_source.json", &s.source)
@@ -105,6 +116,23 @@ func (s *Server) Creates() int {
 	defer s.mu.Unlock()
 
 	return s.creates
+}
+
+// Updates counts the property updates received over either face, answered
+// or not.
+func (s *Server) Updates() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.updates
+}
+
+// Comments counts the comments received over either face, answered or not.
+func (s *Server) Comments() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.posts
 }
 
 func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
@@ -143,6 +171,13 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		s.query(w, r)
 	case r.Method == http.MethodPost && parts[0] == "pages" && len(parts) == 1:
 		s.create(w, r)
+	case r.Method == http.MethodPatch && parts[0] == "pages" && len(parts) == 2:
+		s.update(w, r, id)
+	case r.Method == http.MethodPost && parts[0] == "comments" && len(parts) == 1:
+		s.comment(w, r)
+	case r.Method == http.MethodGet && parts[0] == "users" && len(parts) == 1:
+		q := r.URL.Query()
+		s.page(w, s.people, q.Get("start_cursor"), atoi(q.Get("page_size")))
 	case r.Method == http.MethodGet && parts[0] == "pages" && len(parts) == 2:
 		if p := s.pageByID(id); p != nil {
 			reply(w, p)
@@ -211,7 +246,7 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		v, err := respond(typ, value[typ], options(schema, name, typ))
+		v, err := s.respond(typ, value[typ], options(schema, name, typ))
 		if err != nil {
 			apiError(w, http.StatusBadRequest, "validation_error", name+": "+err.Error())
 
@@ -222,6 +257,134 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	reply(w, s.insert(set, body.Markdown))
+}
+
+// update sets a page's properties from request-shaped values, checked as
+// create checks them.
+func (s *Server) update(w http.ResponseWriter, r *http.Request, id string) {
+	s.updates++
+
+	if s.UpdateStatus != 0 && s.updates == 1 {
+		apiError(w, s.UpdateStatus, "service_unavailable", "Notion is unavailable.")
+
+		return
+	}
+
+	var body struct {
+		Properties map[string]map[string]any `json:"properties"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		apiError(w, http.StatusBadRequest, "invalid_json", err.Error())
+
+		return
+	}
+
+	p := s.pageByID(id)
+	if p == nil {
+		notFound(w, id)
+
+		return
+	}
+
+	set := map[string]any{}
+
+	for name, value := range body.Properties {
+		typ, ok := schemaTypes(s.schema())[name]
+		if !ok {
+			apiError(w, http.StatusBadRequest, "validation_error", name+" is not a property that exists.")
+
+			return
+		}
+
+		v, err := s.respond(typ, value[typ], options(s.schema(), name, typ))
+		if err != nil {
+			apiError(w, http.StatusBadRequest, "validation_error", name+": "+err.Error())
+
+			return
+		}
+
+		set[name] = v
+	}
+
+	s.apply(p, set)
+	reply(w, p)
+}
+
+// apply stores response-shaped values on a page.
+func (s *Server) apply(p page, set map[string]any) {
+	types := schemaTypes(s.schema())
+	props, _ := p["properties"].(map[string]any)
+
+	for name, v := range set {
+		props[name] = map[string]any{"type": types[name], types[name]: v}
+	}
+}
+
+// comment stores a page-level comment from its rich text, authored by the
+// integration.
+func (s *Server) comment(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Parent struct {
+			PageID string `json:"page_id"`
+		} `json:"parent"`
+		RichText []struct {
+			Text struct {
+				Content string `json:"content"`
+			} `json:"text"`
+		} `json:"rich_text"`
+	}
+
+	s.posts++
+
+	if s.CommentStatus != 0 && s.posts == 1 {
+		apiError(w, s.CommentStatus, "service_unavailable", "Notion is unavailable.")
+
+		return
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		apiError(w, http.StatusBadRequest, "invalid_json", err.Error())
+
+		return
+	}
+
+	var runs []any
+
+	for _, rt := range body.RichText {
+		if len(rt.Text.Content) > 2000 {
+			apiError(w, http.StatusBadRequest, "validation_error", "rich_text content is longer than 2000.")
+
+			return
+		}
+
+		runs = append(runs, map[string]any{"type": "text", "plain_text": rt.Text.Content})
+	}
+
+	if len(runs) == 0 || len(runs) > 100 {
+		apiError(w, http.StatusBadRequest, "validation_error", "rich_text should have 1 to 100 items.")
+
+		return
+	}
+
+	reply(w, s.addComment(norm(body.Parent.PageID), runs))
+}
+
+// addComment stores a comment by the integration and returns it.
+func (s *Server) addComment(pageID string, runs []any) map[string]any {
+	c := map[string]any{
+		"object":        "comment",
+		"id":            fmt.Sprintf("c0000000-0000-4000-8000-%012d", s.posts),
+		"discussion_id": "d1",
+		"created_time":  time.Now().UTC().Format(time.RFC3339),
+		"created_by":    map[string]any{"object": "user", "id": "b1"},
+		"rich_text":     runs,
+		"display_name":  map[string]any{"type": "integration", "resolved_name": "f10"},
+	}
+
+	s.comments[pageID] = append(s.comments[pageID], c)
+
+	return c
 }
 
 // insert stores a new page from response-shaped values by property name:
@@ -322,8 +485,12 @@ func options(schema map[string]any, name, typ string) []string {
 	return names
 }
 
-// respond turns a request value into its response shape.
-func respond(typ string, v any, opts []string) (any, error) {
+// respond turns a request value into its response shape; null clears.
+func (s *Server) respond(typ string, v any, opts []string) (any, error) {
+	if v == nil && typ != "title" {
+		return nil, nil
+	}
+
 	known := func(o any) (any, error) {
 		om, _ := o.(map[string]any)
 		name, _ := om["name"].(string)
@@ -349,6 +516,43 @@ func respond(typ string, v any, opts []string) (any, error) {
 		return out, nil
 	case "status", "select":
 		return known(v)
+	case "url", "email", "phone_number", "number", "checkbox":
+		return v, nil
+	case "rich_text":
+		runs, _ := v.([]any)
+		out := make([]any, 0, len(runs))
+
+		for _, run := range runs {
+			rm, _ := run.(map[string]any)
+			txt, _ := rm["text"].(map[string]any)
+			out = append(out, map[string]any{"type": "text", "plain_text": txt["content"]})
+		}
+
+		return out, nil
+	case "date":
+		d, _ := v.(map[string]any)
+		if _, ok := d["start"].(string); !ok {
+			return nil, errors.New("a date needs a start")
+		}
+
+		return map[string]any{"start": d["start"], "end": d["end"], "time_zone": nil}, nil
+	case "people":
+		items, _ := v.([]any)
+		out := make([]any, 0, len(items))
+
+		for _, item := range items {
+			im, _ := item.(map[string]any)
+			id, _ := im["id"].(string)
+
+			name, ok := s.users()[id]
+			if !ok {
+				return nil, fmt.Errorf("%s is not a user", id)
+			}
+
+			out = append(out, map[string]any{"object": "user", "id": id, "name": name})
+		}
+
+		return out, nil
 	case "multi_select", "relation":
 		items, _ := v.([]any)
 		out := make([]any, 0, len(items))

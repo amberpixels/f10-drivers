@@ -28,11 +28,16 @@ const (
 	VerbIndex    = "index"    // stdout: one url, the task list; no argument
 	VerbList     = "list"     // stdout: JSON rows, the first page of open tasks; no argument
 	VerbCreate   = "create"   // stdin: the task as markdown; flags: its properties; stdout: the new id
+	VerbComment  = "comment"  // stdin: the comment as markdown; stdout: the new comment's id
+	VerbUpdate   = "update"   // flags: the properties to set; stdout: the task's id
 )
 
 // Verbs lists every verb, in the contract's order: the read verbs, then the
 // write verbs.
-var Verbs = []string{VerbRead, VerbURL, VerbSearch, VerbBranch, VerbChildren, VerbIndex, VerbList, VerbCreate}
+var Verbs = []string{
+	VerbRead, VerbURL, VerbSearch, VerbBranch, VerbChildren, VerbIndex, VerbList,
+	VerbCreate, VerbComment, VerbUpdate,
+}
 
 // Priorities is the contract's priority vocabulary, most urgent first.
 var Priorities = []string{"urgent", "high", "medium", "low"}
@@ -101,9 +106,42 @@ type Creator interface {
 	Create(ctx context.Context, task NewTask) (string, error)
 }
 
+// TaskUpdate is the properties update sets on a task, each empty when the
+// caller did not set it.
+type TaskUpdate struct {
+	Status   string     // the tracker's own word, as given
+	Priority string     // one of Priorities
+	Labels   []string   // the full set, replacing the task's labels
+	Assignee string     // an email or a name
+	Set      []KeyValue // other properties, by the tracker's config key, in the order given
+}
+
+// KeyValue is one --set key=value.
+type KeyValue struct {
+	Key, Value string
+}
+
+// Empty reports whether the update sets nothing.
+func (u TaskUpdate) Empty() bool {
+	return u.Status == "" && u.Priority == "" && len(u.Labels) == 0 && u.Assignee == "" && len(u.Set) == 0
+}
+
+// Commenter is a Tracker that implements comment. A tracker without it
+// declines the verb.
+type Commenter interface {
+	Comment(ctx context.Context, number, markdown string) (string, error)
+}
+
+// Updater is a Tracker that implements update. A tracker without it
+// declines the verb.
+type Updater interface {
+	Update(ctx context.Context, number string, u TaskUpdate) (string, error)
+}
+
 // Serve answers one verb from t on w. args are the verb's arguments; the
 // read verbs take the first, create parses them as flags and reads the task
-// from stdin. A verb outside the contract returns ErrUnsupported, so a verb
+// from stdin, comment reads its text from stdin, update parses the flags
+// after the number. A verb outside the contract returns ErrUnsupported, so a verb
 // added to f10 later declines correctly.
 func Serve(ctx context.Context, t Tracker, verb string, args []string, stdin io.Reader, w io.Writer) error {
 	arg := ""
@@ -111,7 +149,8 @@ func Serve(ctx context.Context, t Tracker, verb string, args []string, stdin io.
 		arg = args[0]
 	}
 
-	needsNumber := verb == VerbRead || verb == VerbURL || verb == VerbBranch || verb == VerbChildren
+	needsNumber := verb == VerbRead || verb == VerbURL || verb == VerbBranch || verb == VerbChildren ||
+		verb == VerbComment || verb == VerbUpdate
 	if needsNumber && !isNumber(arg) {
 		return fmt.Errorf("%s needs a task number, got %q", verb, arg)
 	}
@@ -129,6 +168,30 @@ func Serve(ctx context.Context, t Tracker, verb string, args []string, stdin io.
 		}
 
 		return line(w)(c.Create(ctx, task))
+	case VerbComment:
+		c, ok := t.(Commenter)
+		if !ok {
+			return ErrUnsupported
+		}
+
+		md, err := parseComment(args[1:], stdin)
+		if err != nil {
+			return err
+		}
+
+		return line(w)(c.Comment(ctx, arg, md))
+	case VerbUpdate:
+		u, ok := t.(Updater)
+		if !ok {
+			return ErrUnsupported
+		}
+
+		upd, err := parseUpdate(args[1:])
+		if err != nil {
+			return err
+		}
+
+		return line(w)(u.Update(ctx, arg, upd))
 	case VerbRead:
 		md, err := t.Read(ctx, arg)
 		if err != nil {
@@ -204,6 +267,65 @@ func parseCreate(args []string, stdin io.Reader) (NewTask, error) {
 	return task, err
 }
 
+// parseComment reads comment's text from stdin; it takes no flags.
+func parseComment(args []string, stdin io.Reader) (string, error) {
+	if len(args) > 0 {
+		return "", fmt.Errorf("comment takes only a task number; got %q", args[0])
+	}
+
+	data, err := io.ReadAll(stdin)
+	if err != nil {
+		return "", fmt.Errorf("comment: reading stdin: %w", err)
+	}
+
+	md := strings.TrimRight(string(data), " \t\r\n")
+	if strings.TrimSpace(md) == "" {
+		return "", errors.New("comment wants its text on stdin; got none")
+	}
+
+	return md, nil
+}
+
+// parseUpdate reads update's flags. Unlike create it fails on an unknown
+// flag: an update whose one change was dropped did nothing.
+func parseUpdate(args []string) (TaskUpdate, error) {
+	var (
+		u      TaskUpdate
+		labels labelFlag
+		sets   setFlag
+	)
+
+	fs := flag.NewFlagSet(VerbUpdate, flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&u.Status, "status", "", "")
+	fs.StringVar(&u.Priority, "priority", "", "")
+	fs.Var(&labels, "label", "")
+	fs.StringVar(&u.Assignee, "assignee", "", "")
+	fs.Var(&sets, "set", "")
+
+	if err := fs.Parse(args); err != nil {
+		return u, fmt.Errorf("update: %w", err)
+	}
+
+	if fs.NArg() > 0 {
+		return u, fmt.Errorf("update takes a task number, then only flags; got %q", fs.Arg(0))
+	}
+
+	u.Labels, u.Set = labels, sets
+
+	if u.Priority != "" && !IsPriority(u.Priority) {
+		return u, fmt.Errorf("update: --priority %q is not one of %s", u.Priority, strings.Join(Priorities, ", "))
+	}
+
+	if u.Empty() {
+		return u, errors.New(
+			"update sets nothing; give at least one of --status, --priority, --label, --assignee, --set",
+		)
+	}
+
+	return u, nil
+}
+
 // dropUnknown removes the flags fs does not define, with their values, and
 // returns the rest and the dropped flag names.
 func dropUnknown(fs *flag.FlagSet, args []string) ([]string, []string) {
@@ -271,6 +393,28 @@ func (l *labelFlag) String() string { return strings.Join(*l, ",") }
 
 func (l *labelFlag) Set(v string) error {
 	*l = append(*l, v)
+
+	return nil
+}
+
+// setFlag collects a repeated --set key=value, each key once.
+type setFlag []KeyValue
+
+func (s *setFlag) String() string { return fmt.Sprint(*s) }
+
+func (s *setFlag) Set(v string) error {
+	key, value, ok := strings.Cut(v, "=")
+	if !ok || key == "" {
+		return fmt.Errorf("want key=value, got %q", v)
+	}
+
+	for _, kv := range *s {
+		if kv.Key == key {
+			return fmt.Errorf("%s is set twice", key)
+		}
+	}
+
+	*s = append(*s, KeyValue{Key: key, Value: value})
 
 	return nil
 }

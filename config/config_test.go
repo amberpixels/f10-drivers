@@ -126,3 +126,45 @@ func TestLoadTransport(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadExtraProperties(t *testing.T) {
+	const base = "prefix = \"MKT\"\n[notion]\ndatabase = \"1a2b3c4d00004000800000000000db01\"\n%s\n[notion.properties]\nid = \"ID\"\nstatus = \"Status\"\n%s\n"
+
+	for _, tc := range []struct{ name, notion, props, err string }{
+		{"extras", "", "result = \"Result URL\"\ndue_date = \"Due\"", ""},
+		{"not a string", "", "result = 3", "notion.properties.result: want a property name"},
+		{"bad key", "", "Result = \"Result\"", "notion.properties.Result: a key update --set names"},
+		{"swapped letters", "", "stauts = \"Status\"", "notion.properties.stauts: did you mean status?"},
+		{"missing letter", "", "label = \"Tags\"", "notion.properties.label: did you mean labels?"},
+		{"unknown notion key", "dun = [\"Done\"]", "", "unknown key notion.dun"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "driver.toml")
+
+			data := strings.Replace(strings.Replace(base, "%s", tc.notion, 1), "%s", tc.props, 1)
+			if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			cfg, err := config.Load(path)
+			if tc.err != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.err) {
+					t.Fatalf("err = %v, want %q", err, tc.err)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			p := cfg.Notion.Properties
+			if p.ID != "ID" || p.Status != "Status" || p.Extra["result"] != "Result URL" ||
+				p.Extra["due_date"] != "Due" ||
+				len(p.Extra) != 2 {
+				t.Fatalf("properties = %+v", p)
+			}
+		})
+	}
+}

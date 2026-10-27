@@ -138,11 +138,31 @@ type Property struct {
 	MultiSelect []Option   `json:"multi_select"`
 	People      []Person   `json:"people"`
 	Relation    []Ref      `json:"relation"`
+	URL         *string    `json:"url"`
+	RichText    []RichText `json:"rich_text"`
+	Number      *float64   `json:"number"`
+	Checkbox    *bool      `json:"checkbox"`
+	Date        *Date      `json:"date"`
+	Email       *string    `json:"email"`
+	PhoneNumber *string    `json:"phone_number"`
+}
+
+// Date is a date property's value.
+type Date struct {
+	Start string  `json:"start"`
+	End   *string `json:"end"`
 }
 
 // Person is a user in a people property.
 type Person struct {
 	Name string `json:"name"`
+}
+
+// User is a workspace member, as --assignee resolves one.
+type User struct {
+	ID    string
+	Name  string
+	Email string
 }
 
 // Ref is a related page in a relation property.
@@ -215,13 +235,19 @@ type Draft struct {
 	Markdown   string
 }
 
-// Value is a property value to set: Text for a title, Names for status,
-// select and multi-select options, Pages for a relation's page ids.
+// Value is a property value to set: Text for a title, a url, text, an
+// email, a phone number or a date's start; Names for status, select and
+// multi-select options; Pages for a relation's page ids; People for user
+// ids. Clear empties the property instead.
 type Value struct {
-	Type  string
-	Text  string
-	Names []string
-	Pages []string
+	Type     string
+	Text     string
+	Names    []string
+	Pages    []string
+	People   []string
+	Number   *float64
+	Checkbox *bool
+	Clear    bool
 }
 
 type queryBody struct {
@@ -318,9 +344,92 @@ func (c *Client) CreatePage(ctx context.Context, p Draft) (*Page, error) {
 	return &created, c.send(ctx, true, http.MethodPost, "/pages", nil, body, &created)
 }
 
+// UpdatePage sets property values on a page. The values are absolute, so
+// it is retried like a read.
+func (c *Client) UpdatePage(ctx context.Context, pageID string, props map[string]Value) error {
+	body := make(map[string]any, len(props))
+	for name, v := range props {
+		body[name] = map[string]any{v.Type: restValue(v)}
+	}
+
+	var updated Page
+
+	return c.do(ctx, http.MethodPatch, "/pages/"+pageID, nil, map[string]any{"properties": body}, &updated)
+}
+
+// CreateComment posts markdown, converted to rich text, as a page-level
+// comment. Like CreatePage, only a 429 is retried.
+func (c *Client) CreateComment(ctx context.Context, pageID, markdown string) (string, error) {
+	rich, err := commentRichText(markdown)
+	if err != nil {
+		return "", err
+	}
+
+	body := map[string]any{"parent": map[string]any{"page_id": pageID}, "rich_text": rich}
+
+	var created struct {
+		ID string `json:"id"`
+	}
+
+	if err := c.send(ctx, true, http.MethodPost, "/comments", nil, body, &created); err != nil {
+		return "", err
+	}
+
+	return created.ID, nil
+}
+
+// Users lists the workspace's people whose name or email holds query,
+// every page of them; bots are left out.
+func (c *Client) Users(ctx context.Context, query string) ([]User, error) {
+	q := url.Values{"page_size": {strconv.Itoa(pageSize)}}
+
+	var users []User
+
+	for {
+		var res list[struct {
+			ID     string `json:"id"`
+			Type   string `json:"type"`
+			Name   string `json:"name"`
+			Person struct {
+				Email string `json:"email"`
+			} `json:"person"`
+		}]
+
+		if err := c.do(ctx, http.MethodGet, "/users", q, nil, &res); err != nil {
+			return nil, err
+		}
+
+		for _, u := range res.Results {
+			if u.Type == "person" && matchesUser(u.Name, u.Person.Email, query) {
+				users = append(users, User{ID: u.ID, Name: u.Name, Email: u.Person.Email})
+			}
+		}
+
+		if !res.HasMore || res.NextCursor == nil {
+			return users, nil
+		}
+
+		q.Set("start_cursor", *res.NextCursor)
+	}
+}
+
+func matchesUser(name, email, query string) bool {
+	q := strings.ToLower(query)
+
+	return strings.Contains(strings.ToLower(name), q) || strings.Contains(strings.ToLower(email), q)
+}
+
 // restValue renders a property value in the API's request shape.
 func restValue(v Value) any {
 	named := func(n string) any { return map[string]any{"name": n} }
+
+	if v.Clear {
+		if v.Type == "rich_text" || v.Type == "multi_select" || v.Type == "people" || v.Type == "relation" {
+			return []any{}
+		}
+
+		return nil
+	}
 
 	switch v.Type {
 	case "title":
@@ -339,6 +448,23 @@ func restValue(v Value) any {
 		}
 
 		return opts
+	case "people":
+		people := make([]any, len(v.People))
+		for i, id := range v.People {
+			people[i] = map[string]any{"id": id}
+		}
+
+		return people
+	case "rich_text":
+		return []any{map[string]any{"text": map[string]any{"content": v.Text}}}
+	case "url", "email", "phone_number":
+		return v.Text
+	case "number":
+		return v.Number
+	case "checkbox":
+		return v.Checkbox
+	case "date":
+		return map[string]any{"start": v.Text}
 	default: // status, select
 		if len(v.Names) == 0 {
 			return nil

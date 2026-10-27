@@ -60,7 +60,96 @@ type Properties struct {
 	Labels   string `toml:"labels"`
 	Parent   string `toml:"parent"`
 	After    string `toml:"after"`
+
+	// Extra is every other key: a property update --set writes, by its key.
+	Extra map[string]string `toml:"-"`
 }
+
+// UnmarshalTOML implements toml.Unmarshaler: the known keys fill their
+// fields, any other key goes to Extra.
+func (p *Properties) UnmarshalTOML(v any) error {
+	table, ok := v.(map[string]any)
+	if !ok {
+		return fmt.Errorf("notion.properties: want a table, got %v", v)
+	}
+
+	known := map[string]*string{
+		"id": &p.ID, "title": &p.Title, "status": &p.Status, "priority": &p.Priority,
+		"assignee": &p.Assignee, "labels": &p.Labels, "parent": &p.Parent, "after": &p.After,
+	}
+
+	for key, raw := range table {
+		name, ok := raw.(string)
+		if !ok {
+			return fmt.Errorf("notion.properties.%s: want a property name, got %v", key, raw)
+		}
+
+		if field, ok := known[key]; ok {
+			*field = name
+
+			continue
+		}
+
+		for k := range known {
+			if nearMiss(key, k) {
+				return fmt.Errorf("notion.properties.%s: did you mean %s?", key, k)
+			}
+		}
+
+		if !extraKey.MatchString(key) {
+			return fmt.Errorf(
+				"notion.properties.%s: a key update --set names takes lowercase letters, digits and _",
+				key,
+			)
+		}
+
+		if p.Extra == nil {
+			p.Extra = map[string]string{}
+		}
+
+		p.Extra[key] = name
+	}
+
+	return nil
+}
+
+// nearMiss reports whether a differs from b by one edit or one swap of
+// neighbouring letters: a misspelled known key, not a property of its own.
+func nearMiss(a, b string) bool {
+	if a == b {
+		return false
+	}
+
+	switch len(a) - len(b) {
+	case 0:
+		var diff []int
+
+		for i := range len(a) {
+			if a[i] != b[i] {
+				diff = append(diff, i)
+			}
+		}
+
+		return len(diff) == 1 ||
+			(len(diff) == 2 && diff[1] == diff[0]+1 && a[diff[0]] == b[diff[1]] && a[diff[1]] == b[diff[0]])
+	case 1, -1:
+		long, short := a, b
+		if len(b) > len(a) {
+			long, short = b, a
+		}
+
+		for i := range len(long) {
+			if long[:i]+long[i+1:] == short {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// extraKey is the shape of a key --set names on a command line.
+var extraKey = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 
 // StringList takes one string or an array of them.
 type StringList []string

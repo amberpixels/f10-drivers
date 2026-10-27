@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -28,6 +30,11 @@ var wantTypes = map[string][]string{
 	"after":    {"relation"},
 }
 
+// settableTypes are the property types update --set can write.
+var settableTypes = []string{
+	"url", "rich_text", "number", "checkbox", "date", "email", "phone_number", "select", "status",
+}
+
 // Tracker is the Notion contract.Tracker.
 type Tracker struct {
 	b    backend
@@ -41,8 +48,10 @@ type Tracker struct {
 }
 
 var (
-	_ contract.Tracker = (*Tracker)(nil)
-	_ contract.Creator = (*Tracker)(nil)
+	_ contract.Tracker   = (*Tracker)(nil)
+	_ contract.Creator   = (*Tracker)(nil)
+	_ contract.Commenter = (*Tracker)(nil)
+	_ contract.Updater   = (*Tracker)(nil)
 )
 
 // backend is the way into Notion: the REST API with an integration token,
@@ -58,6 +67,12 @@ type backend interface {
 	PageMarkdown(ctx context.Context, id string) (*Markdown, error)
 	Comments(ctx context.Context, pageID string) ([]Comment, error)
 	CreatePage(ctx context.Context, p Draft) (*Page, error)
+	// UpdatePage sets property values; it is absolute, so safe to retry.
+	UpdatePage(ctx context.Context, pageID string, props map[string]Value) error
+	// CreateComment posts a page-level comment and returns its id.
+	CreateComment(ctx context.Context, pageID, markdown string) (string, error)
+	// Users returns the workspace's people whose name or email holds query.
+	Users(ctx context.Context, query string) ([]User, error)
 }
 
 // Endpoints override where each way in reaches Notion (tests, proxies).
@@ -145,6 +160,13 @@ func (t *Tracker) Read(ctx context.Context, number string) (string, error) {
 	} {
 		if f[1] != "" {
 			fmt.Fprintf(&b, "%s: %s\n", f[0], f[1])
+		}
+	}
+
+	for _, key := range slices.Sorted(maps.Keys(t.props.Extra)) {
+		name := t.props.Extra[key]
+		if v := display(p.Properties[name]); v != "" {
+			fmt.Fprintf(&b, "%s: %s\n", name, v)
 		}
 	}
 
@@ -366,6 +388,225 @@ func (t *Tracker) Create(ctx context.Context, task contract.NewTask) (string, er
 	return id, nil
 }
 
+// Update sets the given properties on a task and returns its id. Every
+// value is checked against the schema first, and a flag with no property to
+// go to fails: an update whose one change was dropped did nothing.
+func (t *Tracker) Update(ctx context.Context, number string, u contract.TaskUpdate) (string, error) {
+	p, err := t.find(ctx, number)
+	if err != nil {
+		return "", err
+	}
+
+	props := map[string]Value{}
+
+	for _, f := range []struct{ flag, value, prop string }{
+		{"status", u.Status, t.props.Status},
+		{"priority", u.Priority, t.props.Priority},
+	} {
+		if f.value == "" {
+			continue
+		}
+
+		if f.prop == "" {
+			return "", unconfigured(f.flag)
+		}
+
+		name, err := t.optionFor(f.flag, f.value)
+		if err != nil {
+			return "", err
+		}
+
+		props[f.prop] = Value{Type: t.ds.Properties[f.prop].Type, Names: []string{name}}
+	}
+
+	if len(u.Labels) > 0 {
+		if t.props.Labels == "" {
+			return "", unconfigured("label")
+		}
+
+		names, err := t.labelNames(u.Labels)
+		if err != nil {
+			return "", err
+		}
+
+		props[t.props.Labels] = Value{Type: t.ds.Properties[t.props.Labels].Type, Names: names}
+	}
+
+	if u.Assignee != "" {
+		if t.props.Assignee == "" {
+			return "", unconfigured("assignee")
+		}
+
+		user, err := t.assignee(ctx, u.Assignee)
+		if err != nil {
+			return "", err
+		}
+
+		props[t.props.Assignee] = Value{Type: "people", People: []string{user.ID}}
+	}
+
+	for _, kv := range u.Set {
+		name, v, err := t.setValue(kv.Key, kv.Value)
+		if err != nil {
+			return "", err
+		}
+
+		props[name] = v
+	}
+
+	if err := t.b.UpdatePage(ctx, p.ID, props); err != nil {
+		return "", err
+	}
+
+	return t.id(number), nil
+}
+
+// Comment posts markdown as a page-level comment on the task and returns
+// the comment's id.
+func (t *Tracker) Comment(ctx context.Context, number, markdown string) (string, error) {
+	p, err := t.find(ctx, number)
+	if err != nil {
+		return "", err
+	}
+
+	id, err := t.b.CreateComment(ctx, p.ID, markdown)
+	if _, ok := errors.AsType[*UnknownOutcomeError](err); ok {
+		return "", fmt.Errorf("%w; the comment may have been posted: check %s before running comment again", err, p.URL)
+	}
+
+	return id, err
+}
+
+func unconfigured(flag string) error {
+	return fmt.Errorf("--%s: notion.properties sets no property for it", flag)
+}
+
+// assignee resolves an email, or else a name, to the one user it names.
+func (t *Tracker) assignee(ctx context.Context, v string) (*User, error) {
+	users, err := t.b.Users(ctx, v)
+	if err != nil {
+		return nil, err
+	}
+
+	byEmail := strings.Contains(v, "@")
+
+	var (
+		found     []User
+		anyEmails bool
+	)
+
+	for _, u := range users {
+		anyEmails = anyEmails || u.Email != ""
+
+		if (byEmail && strings.EqualFold(u.Email, v)) || (!byEmail && strings.EqualFold(u.Name, v)) {
+			found = append(found, u)
+		}
+	}
+
+	switch {
+	case len(found) == 1:
+		return &found[0], nil
+	case len(found) > 1:
+		names := make([]string, len(found))
+		for i, u := range found {
+			names[i] = fmt.Sprintf("%s <%s>", u.Name, u.Email)
+		}
+
+		return nil, fmt.Errorf(
+			"--assignee %q matches %d users (%s); give an email",
+			v,
+			len(found),
+			strings.Join(names, ", "),
+		)
+	case byEmail && len(users) > 0 && !anyEmails:
+		return nil, fmt.Errorf("--assignee %q: Notion shows no user's email; "+
+			"give the integration the capability to read user information including email addresses", v)
+	default:
+		return nil, fmt.Errorf(
+			"--assignee %q: no Notion user has that %s",
+			v,
+			map[bool]string{true: "email", false: "name"}[byEmail],
+		)
+	}
+}
+
+// setValue checks one --set against its property's schema type and returns
+// the property's name and the value to send; an empty value clears it.
+func (t *Tracker) setValue(key, raw string) (string, Value, error) {
+	name, ok := t.props.Extra[key]
+	if !ok {
+		keys := slices.Sorted(maps.Keys(t.props.Extra))
+		if flag, ok := map[string]string{"status": "status", "priority": "priority", "labels": "label", "assignee": "assignee"}[key]; ok {
+			return "", Value{}, fmt.Errorf("--set %s: use --%s", key, flag)
+		}
+
+		return "", Value{}, fmt.Errorf("--set %s: not a key of [notion.properties] (%s)", key, strings.Join(keys, ", "))
+	}
+
+	typ := t.ds.Properties[name].Type
+	v := Value{Type: typ}
+	bad := func(want string) error {
+		return fmt.Errorf("--set %s=%q: %q is a %s property, want %s", key, raw, name, typ, want)
+	}
+
+	if raw == "" && typ != "checkbox" {
+		v.Clear = true
+
+		return name, v, nil
+	}
+
+	switch typ {
+	case "url":
+		u, err := url.Parse(raw)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return "", v, bad("an absolute http(s) url")
+		}
+
+		v.Text = raw
+	case "number":
+		n, err := strconv.ParseFloat(raw, 64)
+		if err != nil {
+			return "", v, bad("a number")
+		}
+
+		v.Number = &n
+	case "checkbox":
+		b, err := strconv.ParseBool(raw)
+		if err != nil || (raw != "true" && raw != "false") {
+			return "", v, bad("true or false")
+		}
+
+		v.Checkbox = &b
+	case "date":
+		if _, err := time.Parse(time.DateOnly, raw); err != nil {
+			if _, err := time.Parse(time.RFC3339, raw); err != nil {
+				return "", v, bad("a date, YYYY-MM-DD or RFC 3339")
+			}
+		}
+
+		v.Text = raw
+	case "select", "status":
+		names := options(t.ds.Properties[name])
+
+		j := indexFold(names, raw)
+		if j < 0 {
+			return "", v, fmt.Errorf(
+				"--set %s=%q: no option of %q matches (%s)",
+				key,
+				raw,
+				name,
+				strings.Join(names, ", "),
+			)
+		}
+
+		v.Names = []string{names[j]}
+	default: // rich_text, email, phone_number
+		v.Text = raw
+	}
+
+	return name, v, nil
+}
+
 // configured reports whether a create flag has a property to go to, and
 // warns that the flag is dropped when it has none.
 func (t *Tracker) configured(flag, prop string) bool {
@@ -578,6 +819,18 @@ func (t *Tracker) dataSource(ctx context.Context) (*DataSource, error) {
 		}
 	}
 
+	for key, name := range props.Extra {
+		s, ok := ds.Properties[name]
+		if !ok {
+			return nil, fmt.Errorf("notion.properties.%s: the data source has no property %q", key, name)
+		}
+
+		if !slices.Contains(settableTypes, s.Type) {
+			return nil, fmt.Errorf("notion.properties.%s: %q is a %s property; update --set writes %s",
+				key, name, s.Type, strings.Join(settableTypes, ", "))
+		}
+	}
+
 	if err := t.checkPrefix(ds.Properties[props.ID]); err != nil {
 		return nil, err
 	}
@@ -778,6 +1031,32 @@ func optionName(p Property) string {
 		return p.Select.Name
 	default:
 		return ""
+	}
+}
+
+// display renders a --set property's value for read.
+func display(p Property) string {
+	switch {
+	case p.URL != nil:
+		return *p.URL
+	case p.Email != nil:
+		return *p.Email
+	case p.PhoneNumber != nil:
+		return *p.PhoneNumber
+	case p.Number != nil:
+		return strconv.FormatFloat(*p.Number, 'f', -1, 64)
+	case p.Checkbox != nil:
+		return map[bool]string{true: "Yes", false: "No"}[*p.Checkbox]
+	case p.Date != nil:
+		if p.Date.End != nil && *p.Date.End != "" {
+			return p.Date.Start + " -> " + *p.Date.End
+		}
+
+		return p.Date.Start
+	case len(p.RichText) > 0:
+		return plain(p.RichText)
+	default:
+		return optionName(p)
 	}
 }
 

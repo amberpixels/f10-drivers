@@ -31,6 +31,9 @@ const usage = `usage: f10-drivers <tracker> [--config <path>] <verb> [arguments]
 trackers: notion
 verbs:    read, url, search, branch, children, index, list,
           create [--status <s>] [--priority <p>] [--label <l>]... [--parent <n>] [--after <n>] < task.md
+          comment <n> < comment.md
+          update <n> [--status <s>] [--priority <p>] [--label <l>]... [--assignee <email|name>]
+                     [--set <key>=<value>]...
 config:   .f10/driver.toml under the working directory, unless --config names one`
 
 const exitUsage = 2

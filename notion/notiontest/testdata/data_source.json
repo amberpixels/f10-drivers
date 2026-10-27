@@ -93,6 +93,18 @@
    "id": "B",
    "name": "Blocked by",
    "type": "relation"
+  },
+  "Result": {
+   "id": "R",
+   "name": "Result",
+   "type": "url",
+   "url": {}
+  },
+  "Due": {
+   "id": "D",
+   "name": "Due",
+   "type": "date",
+   "date": {}
   }
  }
 }

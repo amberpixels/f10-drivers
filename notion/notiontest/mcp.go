@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"maps"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -290,6 +291,27 @@ func (s *Server) mcp(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		status := 0
+
+		switch call.Name {
+		case "notion-update-page":
+			s.updates++
+			if s.updates == 1 {
+				status = s.UpdateStatus
+			}
+		case "notion-create-comment":
+			s.posts++
+			if s.posts == 1 {
+				status = s.CommentStatus
+			}
+		}
+
+		if status != 0 {
+			http.Error(w, "Notion is unavailable.", status)
+
+			return
+		}
+
 		result, isErr, known := s.tool(call.Name, call.Arguments)
 		if !known {
 			rpcReply(w, *req.ID, nil, map[string]any{"code": -32602, "message": "Unknown tool: " + call.Name})
@@ -347,14 +369,15 @@ func (s *Server) tool(name string, raw json.RawMessage) (any, bool, bool) {
 
 		return map[string]any{"text": s.discussions(norm(id))}, false, true
 	case "notion-get-users":
-		id, _ := args["user_id"].(string)
+		return s.getUsers(args), false, true
+	case "notion-update-page":
+		res, err := s.updatePage(args)
 
-		results := []any{}
-		if n, ok := s.users()[id]; ok {
-			results = append(results, map[string]any{"type": "person", "id": id, "name": n})
-		}
+		return orText(res, err)
+	case "notion-create-comment":
+		res, err := s.createComment(args)
 
-		return map[string]any{"results": results, "has_more": false}, false, true
+		return orText(res, err)
 	case "notion-create-pages":
 		res, err := s.createPages(args)
 
@@ -468,7 +491,7 @@ func (s *Server) mcpSchema() map[string]any {
 
 	for name, typ := range schemaTypes(schema) {
 		p := map[string]any{"name": name, "description": "", "type": map[string]string{
-			"unique_id": "auto_increment_id", "people": "person",
+			"unique_id": "auto_increment_id", "people": "person", "rich_text": "text",
 		}[typ]}
 		if p["type"] == "" {
 			p["type"] = typ
@@ -538,6 +561,24 @@ func (s *Server) values(p page, fetch bool) map[string]any {
 		case "status", "select":
 			opt, _ := prop[typ].(map[string]any)
 			out[name], _ = opt["name"].(string)
+		case "url", "email", "phone_number", "number":
+			if v := prop[typ]; v != nil {
+				out[name] = v
+			}
+		case "rich_text":
+			if t := text(prop[typ]); t != "" {
+				out[name] = t
+			}
+		case "checkbox":
+			if b, ok := prop[typ].(bool); ok {
+				out[name] = map[bool]string{true: "__YES__", false: "__NO__"}[b]
+			}
+		case "date":
+			if d, ok := prop[typ].(map[string]any); ok {
+				out["date:"+name+":start"] = d["start"]
+				out["date:"+name+":end"] = d["end"]
+				out["date:"+name+":is_datetime"] = map[bool]int{true: 1, false: 0}[len(fmt.Sprint(d["start"])) > 10]
+			}
 		case "multi_select", "people", "relation":
 			var items []string
 
@@ -734,6 +775,212 @@ func (s *Server) discussions(pageID string) string {
 	return b.String()
 }
 
+// getUsers answers one user by user_id, or the people whose name or email
+// holds query, with their emails.
+func (s *Server) getUsers(args map[string]any) any {
+	id, _ := args["user_id"].(string)
+	query, _ := args["query"].(string)
+	results := []any{}
+
+	if id != "" {
+		if n, ok := s.users()[id]; ok {
+			results = append(results, map[string]any{"type": "person", "id": id, "name": n})
+		}
+
+		return map[string]any{"results": results, "has_more": false}
+	}
+
+	for _, u := range s.people {
+		um, _ := u.(map[string]any)
+		person, _ := um["person"].(map[string]any)
+		name, _ := um["name"].(string)
+		email, _ := person["email"].(string)
+
+		q := strings.ToLower(query)
+		if strings.Contains(strings.ToLower(name), q) || strings.Contains(strings.ToLower(email), q) {
+			results = append(results, map[string]any{"type": um["type"], "id": um["id"], "name": name, "email": email})
+		}
+	}
+
+	return map[string]any{"results": results, "has_more": false}
+}
+
+// updatePage answers update_properties with values in their SQLite form,
+// checked as createPages checks them.
+func (s *Server) updatePage(args map[string]any) (any, error) {
+	if cmd, _ := args["command"].(string); cmd != "update_properties" {
+		return nil, fmt.Errorf("the fake updates properties only, got %q", cmd)
+	}
+
+	if args["allow_async"] != false {
+		return nil, errors.New("the fake updates synchronously only")
+	}
+
+	pid, _ := args["page_id"].(string)
+
+	p := s.pageByID(norm(pid))
+	if p == nil {
+		return nil, notionErrorf("Could not find page with ID: %s", pid)
+	}
+
+	values, _ := args["properties"].(map[string]any)
+	schema := s.schema()
+	types := schemaTypes(schema)
+	set := map[string]any{}
+
+	for key, v := range values {
+		if strings.HasPrefix(key, "date:") {
+			parts := strings.Split(key, ":")
+			if len(parts) != 3 || types[parts[1]] != "date" {
+				return nil, notionErrorf("Property %q does not exist", key)
+			}
+
+			// Each key changes its own field; a range keeps an end not sent.
+			d, _ := set[parts[1]].(map[string]any)
+			if d == nil {
+				d = s.dateOf(p, parts[1])
+			}
+
+			if parts[2] == "start" || parts[2] == "end" {
+				d[parts[2]] = v
+			}
+
+			set[parts[1]] = d
+
+			continue
+		}
+
+		name := strings.TrimPrefix(key, "userDefined:")
+		if valueKey(name) != key {
+			return nil, notionErrorf("Property %q must be written %q", key, valueKey(name))
+		}
+
+		typ, ok := types[name]
+		if !ok {
+			return nil, notionErrorf("Property %q does not exist", name)
+		}
+
+		req, err := sqliteToRequest(typ, v)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", name, err)
+		}
+
+		resp, err := s.respond(typ, req, options(schema, name, typ))
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", name, err)
+		}
+
+		set[name] = resp
+	}
+
+	for name, v := range set {
+		if d, ok := v.(map[string]any); ok && types[name] == "date" && d["start"] == nil {
+			set[name] = nil
+		}
+	}
+
+	s.apply(p, set)
+
+	return map[string]any{"page_id": pid}, nil
+}
+
+// dateOf copies a page's date value, or an empty one.
+func (s *Server) dateOf(p page, name string) map[string]any {
+	props, _ := p["properties"].(map[string]any)
+	prop, _ := props[name].(map[string]any)
+	d, _ := prop["date"].(map[string]any)
+
+	out := map[string]any{"start": nil, "end": nil, "time_zone": nil}
+	maps.Copy(out, d)
+
+	return out
+}
+
+// sqliteToRequest turns an update's SQLite value into the REST request
+// shape respond checks.
+func sqliteToRequest(typ string, v any) (any, error) {
+	if v == nil {
+		return nil, nil
+	}
+
+	switch typ {
+	case "status", "select":
+		return map[string]any{"name": v}, nil
+	case "checkbox":
+		switch v {
+		case "__YES__":
+			return true, nil
+		case "__NO__":
+			return false, nil
+		}
+
+		return nil, fmt.Errorf("a checkbox takes __YES__ or __NO__, got %v", v)
+	case "number":
+		if _, ok := v.(float64); !ok {
+			return nil, fmt.Errorf("a number takes a JSON number, got %v", v)
+		}
+
+		return v, nil
+	case "url", "email", "phone_number":
+		return v, nil
+	case "rich_text":
+		return []any{map[string]any{"text": map[string]any{"content": v}}}, nil
+	case "people":
+		items, ok := v.([]any)
+		if !ok {
+			return nil, fmt.Errorf("a person property takes an array, got %v", v)
+		}
+
+		out := make([]any, 0, len(items))
+		for _, item := range items {
+			id, _ := item.(string)
+			out = append(out, map[string]any{"id": strings.TrimPrefix(id, "user://")})
+		}
+
+		return out, nil
+	case "multi_select":
+		items, _ := v.([]any)
+		out := make([]any, 0, len(items))
+
+		for _, item := range items {
+			out = append(out, map[string]any{"name": item})
+		}
+
+		return out, nil
+	}
+
+	return nil, fmt.Errorf("the fake cannot update a %s property", typ)
+}
+
+// createComment stores a comment from rich text, as Notion stores it.
+func (s *Server) createComment(args map[string]any) (any, error) {
+	pid, _ := args["page_id"].(string)
+	if s.pageByID(norm(pid)) == nil {
+		return nil, notionErrorf("Could not find page with ID: %s", pid)
+	}
+
+	if _, ok := args["markdown"]; ok {
+		return nil, errors.New("the fake takes rich_text")
+	}
+
+	items, _ := args["rich_text"].([]any)
+	if len(items) == 0 || len(items) > 100 {
+		return nil, notionErrorf("rich_text should have 1 to 100 items")
+	}
+
+	runs := make([]any, 0, len(items))
+
+	for _, item := range items {
+		im, _ := item.(map[string]any)
+		txt, _ := im["text"].(map[string]any)
+		runs = append(runs, map[string]any{"type": "text", "plain_text": txt["content"]})
+	}
+
+	c := s.addComment(norm(pid), runs)
+
+	return map[string]any{"id": c["id"]}, nil
+}
+
 // users is everyone the fixtures name: people properties, and comment
 // authors whose name Notion resolves.
 func (s *Server) users() map[string]string {
@@ -752,6 +999,12 @@ func (s *Server) users() map[string]string {
 				users[id], _ = pm["name"].(string)
 			}
 		}
+	}
+
+	for _, u := range s.people {
+		um, _ := u.(map[string]any)
+		id, _ := um["id"].(string)
+		users[id], _ = um["name"].(string)
 	}
 
 	for _, cs := range s.comments {
@@ -837,7 +1090,7 @@ func (s *Server) createPages(args map[string]any) (any, error) {
 			return nil, fmt.Errorf("the fake cannot set a %s property", typ)
 		}
 
-		resp, err := respond(typ, req, options(schema, name, typ))
+		resp, err := s.respond(typ, req, options(schema, name, typ))
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", name, err)
 		}

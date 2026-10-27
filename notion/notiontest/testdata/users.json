@@ -1,0 +1,45 @@
+[
+ {
+  "object": "user",
+  "id": "u1",
+  "type": "person",
+  "name": "Ann Lee",
+  "person": {
+   "email": "ann@example.com"
+  }
+ },
+ {
+  "object": "user",
+  "id": "u6",
+  "type": "person",
+  "name": "Bo Chen",
+  "person": {
+   "email": "bo@example.com"
+  }
+ },
+ {
+  "object": "user",
+  "id": "u7",
+  "type": "person",
+  "name": "Sam Park",
+  "person": {
+   "email": "sam.park@example.com"
+  }
+ },
+ {
+  "object": "user",
+  "id": "u8",
+  "type": "person",
+  "name": "Sam Park",
+  "person": {
+   "email": "sam.p@example.com"
+  }
+ },
+ {
+  "object": "user",
+  "id": "b1",
+  "type": "bot",
+  "name": "f10",
+  "bot": {}
+ }
+]

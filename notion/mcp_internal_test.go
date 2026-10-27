@@ -126,3 +126,49 @@ func TestShortErrorKeepsOneLine(t *testing.T) {
 		t.Errorf("plain text changed: %q", got)
 	}
 }
+
+// TestPageReadsSettableValues reads the values update --set writes, the
+// date from its expanded keys, as display shows them.
+func TestPageReadsSettableValues(t *testing.T) {
+	m := &mcpBackend{
+		schema: map[string]PropertySchema{
+			"Result": {Type: "url"}, "Notes": {Type: "rich_text"}, "Hours": {Type: "number"},
+			"Shipped": {Type: "checkbox"}, "Due": {Type: "date"}, "Mail": {Type: "email"}, "Empty": {Type: "url"},
+		},
+	}
+
+	p, err := m.page(t.Context(), "https://app.notion.com/p/2b000000000040008000000000000002", map[string]any{
+		"Result": "https://x.test/r", "Notes": "two words", "Hours": 1.5, "Shipped": "__YES__", "Mail": "a@x.test",
+		"date:Due:start": "2026-11-02", "date:Due:end": "2026-11-04", "date:Due:is_datetime": 0.0, "Empty": "",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for name, want := range map[string]string{
+		"Result": "https://x.test/r", "Notes": "two words", "Hours": "1.5", "Shipped": "Yes",
+		"Due": "2026-11-02 -> 2026-11-04", "Mail": "a@x.test", "Empty": "",
+	} {
+		if got := display(p.Properties[name]); got != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
+}
+
+func TestCommentID(t *testing.T) {
+	const page = "2b000000-0000-4000-8000-000000000002"
+
+	for raw, want := range map[string]string{
+		`{"id":"c1"}`: "c1",
+		`"Added comment c0000000000040008000000000000001 to page 2b000000000040008000000000000002"`:                       "c0000000-0000-4000-8000-000000000001",
+		`"Added a comment to page 2b000000-0000-4000-8000-000000000002, discussion c0000000-0000-4000-8000-000000000009"`: "c0000000-0000-4000-8000-000000000009",
+	} {
+		if got, ok := commentID(json.RawMessage(raw), page); !ok || got != want {
+			t.Errorf("commentID(%s) = %q, %v; want %q", raw, got, ok, want)
+		}
+	}
+
+	if _, ok := commentID(json.RawMessage(`"Added a comment to 2b000000000040008000000000000002"`), page); ok {
+		t.Error("the page id alone should name no comment")
+	}
+}

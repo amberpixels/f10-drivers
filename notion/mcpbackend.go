@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/amberpixels/f10-drivers/config"
 	"github.com/amberpixels/f10-drivers/contract"
@@ -28,6 +29,8 @@ const (
 	toolComments = "notion-get-comments"
 	toolUsers    = "notion-get-users"
 	toolCreate   = "notion-create-pages"
+	toolUpdate   = "notion-update-page"
+	toolComment  = "notion-create-comment"
 )
 
 // errNoUniqueID is a Unique ID value with no number: no task.
@@ -144,7 +147,7 @@ type mcpSchemaProp struct {
 }
 
 // MCP's words for the property types the tracker checks by their REST names.
-var mcpTypes = map[string]string{"auto_increment_id": "unique_id", "person": "people"}
+var mcpTypes = map[string]string{"auto_increment_id": "unique_id", "person": "people", "text": "rich_text"}
 
 // DataSource fetches collection://<id> and reads the schema from the
 // <data-source-state> JSON. The schema carries no Unique ID prefix: Page
@@ -490,6 +493,158 @@ func (m *mcpBackend) CreatePage(ctx context.Context, np Draft) (*Page, error) {
 	return p, nil
 }
 
+// UpdatePage runs notion-update-page's update_properties with the values in
+// their SQLite form. The values are absolute, so it is retried like a read.
+func (m *mcpBackend) UpdatePage(ctx context.Context, pageID string, props map[string]Value) error {
+	values := map[string]any{}
+
+	for name, v := range props {
+		key := valueKey(name)
+
+		switch v.Type {
+		case "date":
+			// The end goes too, so a range collapses to the new date as over REST.
+			start, end := "date:"+name+":start", "date:"+name+":end"
+			values[end] = nil
+
+			if v.Clear {
+				values[start] = nil
+
+				continue
+			}
+
+			values[start] = v.Text
+			values["date:"+name+":is_datetime"] = map[bool]int{true: 1, false: 0}[len(v.Text) > len(time.DateOnly)]
+		case "checkbox":
+			values[key] = map[bool]string{true: "__YES__", false: "__NO__"}[v.Checkbox != nil && *v.Checkbox]
+		case "people":
+			values[key] = v.People
+		case "multi_select":
+			values[key] = v.Names
+		case "relation":
+			values[key] = v.Pages
+		case "status", "select":
+			if v.Clear || len(v.Names) == 0 {
+				values[key] = nil
+			} else {
+				values[key] = v.Names[0]
+			}
+		case "number":
+			if v.Clear {
+				values[key] = nil
+			} else {
+				values[key] = v.Number
+			}
+		default: // url, rich_text, email, phone_number, title
+			if v.Clear {
+				values[key] = nil
+			} else {
+				values[key] = v.Text
+			}
+		}
+	}
+
+	args := map[string]any{
+		"page_id":     dashed(pageID),
+		"command":     "update_properties",
+		"properties":  values,
+		"allow_async": false,
+	}
+
+	var res json.RawMessage
+	if err := m.c.call(ctx, toolUpdate, args, false, &res); err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	delete(m.pages, normalize(pageID))
+	m.mu.Unlock()
+
+	return nil
+}
+
+// CreateComment runs notion-create-comment with the markdown converted to
+// rich text, as the REST transport sends it, so both post the same comment.
+func (m *mcpBackend) CreateComment(ctx context.Context, pageID, markdown string) (string, error) {
+	rich, err := commentRichText(markdown)
+	if err != nil {
+		return "", err
+	}
+
+	var res json.RawMessage
+
+	args := map[string]any{"page_id": dashed(pageID), "rich_text": rich}
+	if err := m.c.call(ctx, toolComment, args, true, &res); err != nil {
+		return "", err
+	}
+
+	id, ok := commentID(res, pageID)
+	if !ok {
+		return "", fmt.Errorf("notion mcp: %s succeeded, but its answer names no comment: %s", toolComment, res)
+	}
+
+	return id, nil
+}
+
+// commentID finds the new comment's id: the answer's id field, else the
+// first Notion id in it other than the page's own.
+func commentID(raw json.RawMessage, pageID string) (string, bool) {
+	var named struct {
+		ID string `json:"id"`
+	}
+
+	if json.Unmarshal(raw, &named) == nil && named.ID != "" {
+		return named.ID, true
+	}
+
+	for _, id := range notionIDs.FindAllString(string(raw), -1) {
+		if n := strings.ToLower(normalize(id)); n != strings.ToLower(normalize(pageID)) {
+			return dashed(n), true
+		}
+	}
+
+	return "", false
+}
+
+var notionIDs = regexp.MustCompile(`[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}`)
+
+// Users runs notion-get-users with query, every page of it; bots are left
+// out.
+func (m *mcpBackend) Users(ctx context.Context, query string) ([]User, error) {
+	args := map[string]any{"query": query}
+
+	var users []User
+
+	for {
+		var res struct {
+			Results []struct {
+				ID    string `json:"id"`
+				Type  string `json:"type"`
+				Name  string `json:"name"`
+				Email string `json:"email"`
+			} `json:"results"`
+			HasMore    bool   `json:"has_more"`
+			NextCursor string `json:"next_cursor"`
+		}
+
+		if err := m.c.call(ctx, toolUsers, args, false, &res); err != nil {
+			return nil, err
+		}
+
+		for _, u := range res.Results {
+			if u.Type == "person" {
+				users = append(users, User{ID: u.ID, Name: strings.TrimSpace(u.Name), Email: u.Email})
+			}
+		}
+
+		if !res.HasMore || res.NextCursor == "" {
+			return users, nil
+		}
+
+		args["start_cursor"] = res.NextCursor
+	}
+}
+
 func (m *mcpBackend) fetch(ctx context.Context, id, want string) (*fetchResult, error) {
 	var res fetchResult
 	if err := m.c.call(ctx, toolFetch, map[string]any{"id": id}, false, &res); err != nil {
@@ -560,6 +715,19 @@ func (m *mcpBackend) page(ctx context.Context, url string, values map[string]any
 	}
 
 	for name, s := range m.schema {
+		if s.Type == "date" {
+			if start := str(values["date:"+name+":start"]); start != "" {
+				d := &Date{Start: start}
+				if end := str(values["date:"+name+":end"]); end != "" {
+					d.End = &end
+				}
+
+				p.Properties[name] = Property{Type: s.Type, Date: d}
+			}
+
+			continue
+		}
+
 		v, ok := values[valueKey(name)]
 		if !ok {
 			continue
@@ -605,6 +773,25 @@ func (m *mcpBackend) page(ctx context.Context, url string, values map[string]any
 				if rid, ok := config.NotionID(r); ok {
 					prop.Relation = append(prop.Relation, Ref{ID: dashed(rid)})
 				}
+			}
+		case "url":
+			prop.URL = nonEmpty(str(v))
+		case "email":
+			prop.Email = nonEmpty(str(v))
+		case "phone_number":
+			prop.PhoneNumber = nonEmpty(str(v))
+		case "rich_text":
+			if t := str(v); t != "" {
+				prop.RichText = []RichText{{PlainText: t}}
+			}
+		case "number":
+			if n, ok := v.(float64); ok {
+				prop.Number = &n
+			}
+		case "checkbox":
+			if t := str(v); t != "" {
+				b := t == "__YES__"
+				prop.Checkbox = &b
 			}
 		}
 
@@ -737,6 +924,14 @@ func str(v any) string {
 	default:
 		return ""
 	}
+}
+
+func nonEmpty(s string) *string {
+	if s == "" {
+		return nil
+	}
+
+	return &s
 }
 
 // strs reads an array, or a string holding a JSON array, as strings.

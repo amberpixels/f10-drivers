@@ -31,6 +31,8 @@ status = "Status"
 priority = "Priority"
 assignee = "Assignee"
 labels = "Tags"
+result = "Result"
+due = "Due"
 %s
 
 [notion.priority]
@@ -42,6 +44,15 @@ low = "Low"
 
 const relations = `parent = "Parent"
 after = "Blocked by"`
+
+// fixture is the fixture database for conformance.Check, every write verb
+// answered.
+var fixture = conformance.Fixture{
+	Task: "2", Parent: "2", Missing: "99", Query: "summary",
+	Implements: []string{"create", "comment", "update"},
+	Update:     []string{"--status", "Done", "--set", "result=https://example.com/report", "--set", "due=2026-11-02"},
+	UpdateWant: []string{"Status: Done\n", "Result: https://example.com/report\n", "Due: 2026-11-02\n"},
+}
 
 var binary string
 
@@ -112,16 +123,14 @@ func write(t *testing.T, path, content string, mode os.FileMode) {
 
 func TestNotionConformance(t *testing.T) {
 	run := project(t, strings.Replace(notionConfig, "%s", relations, 1))
-	conformance.Check(t, run, conformance.Fixture{
-		Task: "2", Parent: "2", Missing: "99", Query: "summary", Implements: []string{"create"},
-	})
+	conformance.Check(t, run, fixture)
 }
 
 func TestNotionWithoutRelationsDeclinesChildren(t *testing.T) {
 	run := project(t, strings.Replace(notionConfig, "%s", "", 1))
-	conformance.Check(t, run, conformance.Fixture{
-		Task: "2", Missing: "99", Query: "summary", Declined: []string{"children"},
-	})
+	fx := fixture
+	fx.Parent, fx.Declined = "", []string{"children"}
+	conformance.Check(t, run, fx)
 }
 
 // TestNotionAnswers pins what each verb prints for the fixture database.
@@ -414,12 +423,13 @@ func TestNotionCreateDropsUnconfiguredProperties(t *testing.T) {
 	}
 }
 
-// TestConformanceAcceptsADriverThatDeclinesCreate runs the check against a
-// driver that answers every verb but create, with the fixture not listing it.
-func TestConformanceAcceptsADriverThatDeclinesCreate(t *testing.T) {
+// TestConformanceAcceptsADriverThatDeclinesWrites runs the check against a
+// driver that answers every verb but the write verbs, with the fixture not
+// listing them.
+func TestConformanceAcceptsADriverThatDeclinesWrites(t *testing.T) {
 	run := project(t, strings.Replace(notionConfig, "%s", relations, 1))
 	declining := func(t *testing.T, stdin string, args ...string) conformance.Result {
-		if len(args) > 0 && args[0] == "create" {
+		if len(args) > 0 && slices.Contains([]string{"create", "comment", "update"}, args[0]) {
 			return conformance.Result{Code: 3}
 		}
 
@@ -503,9 +513,7 @@ func loginAt(t *testing.T, root string, env []string) {
 
 func TestNotionMCPConformance(t *testing.T) {
 	run, _, _ := mcpProject(t, notiontest.New(t), strings.Replace(mcpConfig, "%s", relations, 1), true)
-	conformance.Check(t, run, conformance.Fixture{
-		Task: "2", Parent: "2", Missing: "99", Query: "summary", Implements: []string{"create"},
-	})
+	conformance.Check(t, run, fixture)
 }
 
 // TestNotionMCPAnswers pins that MCP answers what the REST path answers,
@@ -703,4 +711,162 @@ func TestNotionMCPConfigRefusesTokenEnv(t *testing.T) {
 	if res.Code == 0 || !strings.Contains(res.Stderr, `notion.token_env applies only to transport = "api"`) {
 		t.Fatalf("exit %d, stderr %q", res.Code, res.Stderr)
 	}
+}
+
+// transports runs f once per way into srv: the REST API and the MCP server.
+func transports(t *testing.T, f func(t *testing.T, srv *notiontest.Server, run conformance.Runner)) {
+	t.Helper()
+
+	t.Run("api", func(t *testing.T) {
+		srv := notiontest.New(t)
+		f(t, srv, projectOn(t, srv, strings.Replace(notionConfig, "%s", relations, 1)))
+	})
+
+	t.Run("mcp", func(t *testing.T) {
+		srv := notiontest.New(t)
+		run, _, _ := mcpProject(t, srv, strings.Replace(mcpConfig, "%s", relations, 1), true)
+		f(t, srv, run)
+	})
+}
+
+// TestNotionUpdate sets every kind of property and reads them back.
+func TestNotionUpdate(t *testing.T) {
+	transports(t, func(t *testing.T, srv *notiontest.Server, run conformance.Runner) {
+		res := run(t, "", "update", "3", "--status", "in progress", "--priority", "urgent",
+			"--label", "launch", "--label", "data", "--assignee", "BO@example.com",
+			"--set", "result=https://example.com/r", "--set", "due=2026-11-02")
+		if res.Code != 0 || res.Stdout != "MKT-3\n" || res.Stderr != "" {
+			t.Fatalf("exit %d, stdout %q, stderr %q", res.Code, res.Stdout, res.Stderr)
+		}
+
+		res = run(t, "", "read", "3")
+		for _, want := range []string{
+			"Status: In progress\n", "Priority: urgent\n", "Labels: launch, data\n", "Assignee: Bo Chen\n",
+			"Due: 2026-11-02\n", "Result: https://example.com/r\n",
+		} {
+			if !strings.Contains(res.Stdout, want) {
+				t.Errorf("read lacks %q:\n%s", want, res.Stdout)
+			}
+		}
+
+		// An empty --set clears; an assignee by name replaces.
+		if res = run(t, "", "update", "3", "--set", "due=", "--assignee", "ann lee"); res.Code != 0 {
+			t.Fatalf("clearing: exit %d: %s", res.Code, res.Stderr)
+		}
+
+		res = run(t, "", "read", "3")
+		if strings.Contains(res.Stdout, "Due:") || !strings.Contains(res.Stdout, "Assignee: Ann Lee\n") {
+			t.Errorf("want Due cleared and Ann Lee assigned:\n%s", res.Stdout)
+		}
+	})
+}
+
+func TestNotionUpdateRejectsBeforeSending(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"no flags", nil, "update sets nothing"},
+		{"unknown flag", []string{"--type", "bug"}, "update: flag provided but not defined: -type"},
+		{"positional", []string{"--status", "Done", "extra"}, `got "extra"`},
+		{"status", []string{"--status", "Blocked"}, `--status "Blocked": no option of "Status" matches`},
+		{"label", []string{"--label", "ads"}, `--label "ads" is not an option of "Tags"`},
+		{"unknown key", []string{"--set", "owner=x"}, "--set owner: not a key of [notion.properties] (due, result)"},
+		{"fixed key", []string{"--set", "labels=x"}, "--set labels: use --label"},
+		{"no equals", []string{"--set", "result"}, `want key=value, got "result"`},
+		{"bad url", []string{"--set", "result=example.com"}, `"Result" is a url property, want an absolute http(s) url`},
+		{"bad date", []string{"--set", "due=next week"}, `"Due" is a date property, want a date`},
+		{"no such user", []string{"--assignee", "zed@example.com"}, "no Notion user has that email"},
+		{"two users", []string{"--assignee", "Sam Park"}, `matches 2 users (Sam Park <sam.park@example.com>, Sam Park <sam.p@example.com>)`},
+		{"missing task", []string{"--status", "Done"}, "MKT-99 not found"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			transports(t, func(t *testing.T, srv *notiontest.Server, run conformance.Runner) {
+				number := "3"
+				if tc.name == "missing task" {
+					number = "99"
+				}
+
+				res := run(t, "", append([]string{"update", number}, tc.args...)...)
+				if res.Code != 1 || !strings.Contains(res.Stderr, tc.want) {
+					t.Fatalf("want exit 1 naming %q, got exit %d, stderr %q", tc.want, res.Code, res.Stderr)
+				}
+
+				if srv.Updates() != 0 {
+					t.Fatalf("%d update(s) sent, want none", srv.Updates())
+				}
+			})
+		})
+	}
+}
+
+func TestNotionUpdateFailsOnAnUnconfiguredFlag(t *testing.T) {
+	srv := notiontest.New(t)
+	run := projectOn(
+		t,
+		srv,
+		strings.Replace(strings.Replace(notionConfig, "%s", "", 1), "assignee = \"Assignee\"\n", "", 1),
+	)
+
+	res := run(t, "", "update", "3", "--assignee", "ann@example.com")
+	if res.Code != 1 || !strings.Contains(res.Stderr, "--assignee: notion.properties sets no property for it") ||
+		srv.Updates() != 0 {
+		t.Fatalf("exit %d, %d update(s), stderr %q", res.Code, srv.Updates(), res.Stderr)
+	}
+}
+
+func TestNotionUpdateRetriesServerErrors(t *testing.T) {
+	transports(t, func(t *testing.T, srv *notiontest.Server, run conformance.Runner) {
+		srv.UpdateStatus = 502
+
+		res := run(t, "", "update", "3", "--status", "Done")
+		if res.Code != 0 || srv.Updates() != 2 {
+			t.Fatalf(
+				"want a retried update, got exit %d, %d request(s), stderr %q",
+				res.Code,
+				srv.Updates(),
+				res.Stderr,
+			)
+		}
+	})
+}
+
+// TestNotionComment posts markdown and reads its text back among the
+// comments.
+func TestNotionComment(t *testing.T) {
+	transports(t, func(t *testing.T, srv *notiontest.Server, run conformance.Runner) {
+		res := run(t, "## Result\n\nThe report is **ready**: [link](https://example.com/r).\n", "comment", "3")
+		if res.Code != 0 || strings.TrimSpace(res.Stdout) == "" || strings.Count(res.Stdout, "\n") != 1 {
+			t.Fatalf("exit %d, stdout %q, stderr %q", res.Code, res.Stdout, res.Stderr)
+		}
+
+		res = run(t, "", "read", "3")
+		if !strings.Contains(res.Stdout, "Result\n\nThe report is ready: link.") ||
+			strings.Contains(res.Stdout, "## Result") ||
+			!strings.Contains(res.Stdout, "**f10**") {
+			t.Fatalf("read lacks the comment:\n%s", res.Stdout)
+		}
+
+		if res = run(t, " \n", "comment", "3"); res.Code != 1 || !strings.Contains(res.Stderr, "got none") {
+			t.Fatalf("an empty comment: exit %d, stderr %q", res.Code, res.Stderr)
+		}
+
+		if srv.Comments() != 1 {
+			t.Fatalf("%d comment(s) sent, want 1", srv.Comments())
+		}
+	})
+}
+
+func TestNotionCommentNeverRetriesServerErrors(t *testing.T) {
+	transports(t, func(t *testing.T, srv *notiontest.Server, run conformance.Runner) {
+		srv.CommentStatus = 502
+
+		res := run(t, "Done.", "comment", "3")
+		if res.Code == 0 || !strings.Contains(res.Stderr, "the comment may have been posted: check https://") ||
+			srv.Comments() != 1 {
+			t.Fatalf("want one request and an unknown outcome, got exit %d, %d request(s), stderr %q",
+				res.Code, srv.Comments(), res.Stderr)
+		}
+	})
 }
