@@ -13,7 +13,9 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
+	"runtime"
 	"runtime/debug"
 	"strings"
 
@@ -23,6 +25,7 @@ import (
 )
 
 const usage = `usage: f10-drivers <tracker> [--config <path>] <verb> [arguments]
+       f10-drivers notion login | logout
        f10-drivers --version
 
 trackers: notion
@@ -33,15 +36,77 @@ config:   .f10/driver.toml under the working directory, unless --config names on
 const exitUsage = 2
 
 // trackers builds each tracker from its config; warn takes non-fatal notices.
-var trackers = map[string]func(cfg *config.Config, warn io.Writer) (contract.Tracker, error){
-	"notion": func(cfg *config.Config, warn io.Writer) (contract.Tracker, error) {
-		base, err := testAPI("F10_DRIVERS_NOTION_API")
+var trackers = map[string]func(ctx context.Context, cfg *config.Config, warn io.Writer) (contract.Tracker, error){
+	"notion": func(ctx context.Context, cfg *config.Config, warn io.Writer) (contract.Tracker, error) {
+		api, err := testAPI("F10_DRIVERS_NOTION_API")
 		if err != nil {
 			return nil, err
 		}
 
-		return notion.New(cfg, base, warn)
+		mcp, err := notionMCP()
+		if err != nil {
+			return nil, err
+		}
+
+		return notion.New(ctx, cfg, notion.Endpoints{API: api, MCP: mcp}, warn)
 	},
+}
+
+// notionMCP is the MCP server the notion transport "mcp" logs in to.
+func notionMCP() (string, error) {
+	mcp, err := testAPI("F10_DRIVERS_NOTION_MCP")
+	if err != nil || mcp != "" {
+		return mcp, err
+	}
+
+	return notion.DefaultMCPURL, nil
+}
+
+// noBrowserEnv set makes login only print the url, for a test or a machine
+// with no browser to open.
+const noBrowserEnv = "F10_DRIVERS_NO_BROWSER"
+
+// notionAccount answers `notion login` and `notion logout`, which need no
+// config: there is one MCP server.
+func notionAccount(ctx context.Context, verb string, stdout io.Writer) error {
+	server, err := notionMCP()
+	if err != nil {
+		return err
+	}
+
+	if verb == "logout" {
+		return notion.Logout(ctx, server, stdout)
+	}
+
+	open := func(u string) error { return openBrowser(ctx, u) }
+	if os.Getenv(noBrowserEnv) != "" {
+		open = nil
+	}
+
+	return notion.Login(ctx, notion.LoginOptions{Server: server, Open: open, Out: stdout})
+}
+
+// openBrowser opens a url with the OS's opener; it does not wait for the
+// browser.
+func openBrowser(ctx context.Context, u string) error {
+	var cmd *exec.Cmd
+
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.CommandContext(ctx, "open", u)
+	case "windows":
+		cmd = exec.CommandContext(ctx, "rundll32", "url.dll,FileProtocolHandler", u)
+	default:
+		cmd = exec.CommandContext(ctx, "xdg-open", u)
+	}
+
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+
+	go func() { _ = cmd.Wait() }()
+
+	return nil
 }
 
 // testAPI reads an API root override, which exists for tests: it must point
@@ -53,7 +118,7 @@ func testAPI(env string) (string, error) {
 	}
 
 	u, err := url.Parse(v)
-	if err != nil || (u.Hostname() != "127.0.0.1" && u.Hostname() != "localhost" && u.Hostname() != "::1") {
+	if err != nil || !notion.IsLoopback(u.Hostname()) {
 		return "", fmt.Errorf("%s must be a loopback url, got %q", env, v)
 	}
 
@@ -101,12 +166,20 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return exitUsage
 	}
 
+	if inv.tracker == "notion" && (verb == "login" || verb == "logout") && len(verbArgs) == 0 {
+		if err := notionAccount(ctx, verb, stdout); err != nil {
+			return fail(stderr, err)
+		}
+
+		return 0
+	}
+
 	cfg, err := config.Load(inv.config)
 	if err != nil {
 		return fail(stderr, err)
 	}
 
-	tracker, err := newTracker(cfg, stderr)
+	tracker, err := newTracker(ctx, cfg, stderr)
 	if err != nil {
 		return fail(stderr, err)
 	}

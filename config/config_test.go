@@ -3,6 +3,7 @@ package config_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/amberpixels/f10-drivers/config"
@@ -88,5 +89,40 @@ high = ["High", "urgent-ish"]
 func TestLoadMissing(t *testing.T) {
 	if _, err := config.Load(filepath.Join(t.TempDir(), "nope.toml")); err == nil {
 		t.Fatal("want an error for a missing config")
+	}
+}
+
+func TestLoadTransport(t *testing.T) {
+	const base = "prefix = \"MKT\"\n[notion]\ndatabase = \"1a2b3c4d00004000800000000000db01\"\n%s\n[notion.properties]\nid = \"ID\"\n"
+
+	for _, tc := range []struct{ name, line, want, err string }{
+		{"default", "", config.TransportAPI, ""},
+		{"mcp", `transport = "mcp"`, config.TransportMCP, ""},
+		{"unknown", `transport = "grpc"`, "", `notion.transport: "grpc" is neither "api" nor "mcp"`},
+		{"token_env with mcp", "transport = \"mcp\"\ntoken_env = \"T\"", "", `notion.token_env applies only to transport = "api"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "driver.toml")
+			if err := os.WriteFile(path, []byte(strings.Replace(base, "%s", tc.line, 1)), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			cfg, err := config.Load(path)
+			if tc.err != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.err) {
+					t.Fatalf("err = %v, want %q", err, tc.err)
+				}
+
+				return
+			}
+
+			if err != nil || cfg.Notion.Transport != tc.want {
+				t.Fatalf("transport = %+v, err = %v; want %q", cfg.Notion, err, tc.want)
+			}
+
+			if tc.want == config.TransportMCP && cfg.Notion.TokenEnv != "" {
+				t.Errorf("mcp should get no token_env default, got %q", cfg.Notion.TokenEnv)
+			}
+		})
 	}
 }

@@ -31,9 +31,16 @@ type Config struct {
 	Path string `toml:"-"` // the file Load read, for error messages
 }
 
+// The ways into Notion notion.transport names.
+const (
+	TransportAPI = "api" // the REST API, with an integration token
+	TransportMCP = "mcp" // Notion's hosted MCP server, as the logged-in user
+)
+
 // Notion is the [notion] table.
 type Notion struct {
-	TokenEnv   string                `toml:"token_env"`   // the env var holding the token, NOTION_TOKEN by default
+	Transport  string                `toml:"transport"`   // TransportAPI by default
+	TokenEnv   string                `toml:"token_env"`   // the env var holding the token, NOTION_TOKEN by default; api only
 	Database   string                `toml:"database"`    // a database id or url
 	DataSource string                `toml:"data_source"` // set when the database has several
 	Done       []string              `toml:"done"`        // statuses that close a task, ["Done"] by default
@@ -145,7 +152,19 @@ func (n *Notion) PriorityOf(value string) string {
 func (n *Notion) IsDone(status string) bool { return slices.Contains(n.Done, status) }
 
 func (n *Notion) validate() error {
-	if n.TokenEnv == "" {
+	switch n.Transport {
+	case "":
+		n.Transport = TransportAPI
+	case TransportAPI, TransportMCP:
+	default:
+		return fmt.Errorf("notion.transport: %q is neither %q nor %q", n.Transport, TransportAPI, TransportMCP)
+	}
+
+	if n.Transport == TransportMCP && n.TokenEnv != "" {
+		return fmt.Errorf("notion.token_env applies only to transport = %q", TransportAPI)
+	}
+
+	if n.Transport == TransportAPI && n.TokenEnv == "" {
 		n.TokenEnv = "NOTION_TOKEN"
 	}
 

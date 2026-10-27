@@ -133,7 +133,7 @@ func TestCreatePageRetriesOnlyRateLimit(t *testing.T) {
 			_, _ = w.Write([]byte(`{"id":"p1","url":"https://x.test/p1"}`))
 		}))
 
-		_, err := notion.NewClient(srv.URL, "tok").CreatePage(t.Context(), notion.NewPage{})
+		_, err := notion.NewClient(srv.URL, "tok").CreatePage(t.Context(), notion.Draft{})
 		srv.Close()
 
 		var unknown *notion.UnknownOutcomeError
@@ -154,7 +154,7 @@ func TestCreatePageLostConnectionIsUnknown(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := notion.NewClient(srv.URL, "tok").CreatePage(t.Context(), notion.NewPage{})
+	_, err := notion.NewClient(srv.URL, "tok").CreatePage(t.Context(), notion.Draft{})
 
 	if _, ok := errors.AsType[*notion.UnknownOutcomeError](err); !ok {
 		t.Fatalf("err = %v, want an *UnknownOutcomeError", err)
@@ -167,7 +167,7 @@ func TestCreatePageUnreadableAnswerSaysCreated(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := notion.NewClient(srv.URL, "tok").CreatePage(t.Context(), notion.NewPage{})
+	_, err := notion.NewClient(srv.URL, "tok").CreatePage(t.Context(), notion.Draft{})
 
 	if _, unknown := errors.AsType[*notion.UnknownOutcomeError](err); err == nil || unknown ||
 		!strings.Contains(err.Error(), "succeeded") {
@@ -179,7 +179,7 @@ func TestCreatePageCancelledBeforeSendingIsNotUnknown(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	_, err := notion.NewClient("http://127.0.0.1:1", "tok").CreatePage(ctx, notion.NewPage{})
+	_, err := notion.NewClient("http://127.0.0.1:1", "tok").CreatePage(ctx, notion.Draft{})
 
 	if _, unknown := errors.AsType[*notion.UnknownOutcomeError](err); !errors.Is(err, context.Canceled) || unknown {
 		t.Fatalf("err = %v, want context.Canceled, not an unknown outcome", err)

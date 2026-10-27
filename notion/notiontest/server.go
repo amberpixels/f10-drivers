@@ -43,8 +43,19 @@ type Server struct {
 	// nothing.
 	CreateStatus int
 
-	mu       sync.Mutex // guards pages, markdown and creates, which create writes
+	// RowLimit caps every rows-mode answer of the MCP face, which has no
+	// cursor, so a test can make it answer has_more.
+	RowLimit int
+
+	// Protocol, when set, is the MCP version initialize answers.
+	Protocol string
+
+	mu       sync.Mutex // guards pages, markdown and creates, which create writes, and the MCP face's state
 	creates  int
+	oauth    oauthState
+	calls    map[string]int
+	session  string
+	sessions int
 	pages    []page
 	comments map[string][]any
 	markdown map[string]any
@@ -56,7 +67,13 @@ type Server struct {
 func New(t *testing.T) *Server {
 	t.Helper()
 
-	s := &Server{}
+	s := &Server{
+		oauth: oauthState{
+			clients: map[string][]string{}, codes: map[string]grant{},
+			access: map[string]bool{}, refresh: map[string]string{},
+		},
+		calls: map[string]int{},
+	}
 	load(t, "pages.json", &s.pages)
 	load(t, "comments.json", &s.comments)
 	load(t, "markdown.json", &s.markdown)
@@ -93,6 +110,10 @@ func (s *Server) Creates() int {
 func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if s.serveMCP(w, r) {
+		return
+	}
 
 	if r.Header.Get("Authorization") != "Bearer "+Token {
 		apiError(w, http.StatusUnauthorized, "unauthorized", "API token is invalid.")
@@ -180,15 +201,7 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 
 	schema := s.schema()
 	types := schemaTypes(schema)
-	props := map[string]any{}
-
-	for name, typ := range types {
-		props[name] = map[string]any{"type": typ}
-
-		if opts := options(schema, name, typ); typ == "status" && len(opts) > 0 {
-			props[name] = map[string]any{"type": typ, typ: map[string]any{"name": opts[0]}} // Notion's default
-		}
-	}
+	set := map[string]any{}
 
 	for name, value := range body.Properties {
 		typ, ok := types[name]
@@ -205,7 +218,29 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		props[name] = map[string]any{"type": typ, typ: v}
+		set[name] = v
+	}
+
+	reply(w, s.insert(set, body.Markdown))
+}
+
+// insert stores a new page from response-shaped values by property name:
+// the status Notion defaults to, the next Unique ID, and its markdown.
+func (s *Server) insert(set map[string]any, markdown string) page {
+	schema := s.schema()
+	types := schemaTypes(schema)
+	props := map[string]any{}
+
+	for name, typ := range types {
+		props[name] = map[string]any{"type": typ}
+
+		if opts := options(schema, name, typ); typ == "status" && len(opts) > 0 {
+			props[name] = map[string]any{"type": typ, typ: map[string]any{"name": opts[0]}} // Notion's default
+		}
+	}
+
+	for name, v := range set {
+		props[name] = map[string]any{"type": types[name], types[name]: v}
 	}
 
 	next := 0
@@ -245,12 +280,12 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 	s.markdown[norm(id)] = map[string]any{
 		"object":            "page_markdown",
 		"id":                id,
-		"markdown":          body.Markdown,
+		"markdown":          markdown,
 		"truncated":         false,
 		"unknown_block_ids": []any{},
 	}
 
-	reply(w, p)
+	return p
 }
 
 func (s *Server) schema() map[string]any {

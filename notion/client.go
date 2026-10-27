@@ -4,6 +4,7 @@ package notion
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -83,11 +84,14 @@ func (e *UnknownOutcomeError) Unwrap() error { return e.Err }
 
 // Database is a database object, trimmed to what the tracker reads.
 type Database struct {
-	URL         string `json:"url"`
-	DataSources []struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
-	} `json:"data_sources"`
+	URL         string          `json:"url"`
+	DataSources []DataSourceRef `json:"data_sources"`
+}
+
+// DataSourceRef names one of a database's data sources.
+type DataSourceRef struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
 // DataSource is a data source object: its parent database and its schema.
@@ -132,12 +136,18 @@ type Property struct {
 	Status      *Option    `json:"status"`
 	Select      *Option    `json:"select"`
 	MultiSelect []Option   `json:"multi_select"`
-	People      []struct {
-		Name string `json:"name"`
-	} `json:"people"`
-	Relation []struct {
-		ID string `json:"id"`
-	} `json:"relation"`
+	People      []Person   `json:"people"`
+	Relation    []Ref      `json:"relation"`
+}
+
+// Person is a user in a people property.
+type Person struct {
+	Name string `json:"name"`
+}
+
+// Ref is a related page in a relation property.
+type Ref struct {
+	ID string `json:"id"`
 }
 
 // UniqueID is a Unique ID property value.
@@ -172,25 +182,52 @@ type Comment struct {
 	} `json:"display_name"`
 }
 
-// Query is a data source query body.
+// Query asks a data source for the pages matching every filter.
 type Query struct {
+	Filters  []Filter
+	PageSize int
+}
+
+// Filter matches one property. Type is the property's schema type, which
+// decides the operators a backend may send.
+type Filter struct {
+	Property string
+	Type     string
+	Op       Op
+	Value    any
+}
+
+// Op is a filter operator, named as the REST API names it.
+type Op string
+
+// The operators the tracker filters with.
+const (
+	OpEquals    Op = "equals"
+	OpNotEquals Op = "does_not_equal"
+	OpContains  Op = "contains" // a title's text, or a relation's page id
+)
+
+// Draft is a page to create in a data source: its property values by
+// name, and its body as markdown.
+type Draft struct {
+	DataSource string
+	Properties map[string]Value
+	Markdown   string
+}
+
+// Value is a property value to set: Text for a title, Names for status,
+// select and multi-select options, Pages for a relation's page ids.
+type Value struct {
+	Type  string
+	Text  string
+	Names []string
+	Pages []string
+}
+
+type queryBody struct {
 	Filter      any    `json:"filter,omitempty"`
 	PageSize    int    `json:"page_size,omitempty"`
 	StartCursor string `json:"start_cursor,omitempty"`
-}
-
-// NewPage is a create-page body: a page in a data source, with its
-// properties in Notion's request shapes and its body as markdown.
-type NewPage struct {
-	Parent     PageParent     `json:"parent"`
-	Properties map[string]any `json:"properties"`
-	Markdown   string         `json:"markdown,omitempty"`
-}
-
-// PageParent is the data source a new page goes into.
-type PageParent struct {
-	Type         string `json:"type"` // "data_source_id"
-	DataSourceID string `json:"data_source_id"`
 }
 
 type list[T any] struct {
@@ -216,15 +253,13 @@ func (c *Client) DataSource(ctx context.Context, id string) (*DataSource, error)
 // Query runs q against a data source. With all set it follows every page;
 // otherwise it returns the first.
 func (c *Client) Query(ctx context.Context, dataSource string, q Query, all bool) ([]Page, error) {
-	if q.PageSize == 0 {
-		q.PageSize = pageSize
-	}
+	body := queryBody{Filter: restFilter(q.Filters), PageSize: cmp.Or(q.PageSize, pageSize)}
 
 	var pages []Page
 
 	for {
 		var res list[Page]
-		if err := c.do(ctx, http.MethodPost, "/data_sources/"+dataSource+"/query", nil, q, &res); err != nil {
+		if err := c.do(ctx, http.MethodPost, "/data_sources/"+dataSource+"/query", nil, body, &res); err != nil {
 			return nil, err
 		}
 
@@ -233,7 +268,24 @@ func (c *Client) Query(ctx context.Context, dataSource string, q Query, all bool
 			return pages, nil
 		}
 
-		q.StartCursor = *res.NextCursor
+		body.StartCursor = *res.NextCursor
+	}
+}
+
+// restFilter renders filters in the API's shape, and-ed when several.
+func restFilter(filters []Filter) any {
+	all := make([]any, len(filters))
+	for i, f := range filters {
+		all[i] = map[string]any{"property": f.Property, f.Type: map[string]any{string(f.Op): f.Value}}
+	}
+
+	switch len(all) {
+	case 0:
+		return nil
+	case 1:
+		return all[0]
+	default:
+		return map[string]any{"and": all}
 	}
 }
 
@@ -247,10 +299,53 @@ func (c *Client) Page(ctx context.Context, id string) (*Page, error) {
 // CreatePage creates a page. It is the client's one write: only a 429 is
 // retried, and a failure that leaves the outcome open is an
 // *UnknownOutcomeError.
-func (c *Client) CreatePage(ctx context.Context, p NewPage) (*Page, error) {
+func (c *Client) CreatePage(ctx context.Context, p Draft) (*Page, error) {
+	props := make(map[string]any, len(p.Properties))
+	for name, v := range p.Properties {
+		props[name] = map[string]any{v.Type: restValue(v)}
+	}
+
+	body := map[string]any{
+		"parent":     map[string]any{"type": "data_source_id", "data_source_id": p.DataSource},
+		"properties": props,
+	}
+	if p.Markdown != "" {
+		body["markdown"] = p.Markdown
+	}
+
 	var created Page
 
-	return &created, c.send(ctx, true, http.MethodPost, "/pages", nil, p, &created)
+	return &created, c.send(ctx, true, http.MethodPost, "/pages", nil, body, &created)
+}
+
+// restValue renders a property value in the API's request shape.
+func restValue(v Value) any {
+	named := func(n string) any { return map[string]any{"name": n} }
+
+	switch v.Type {
+	case "title":
+		return []any{map[string]any{"text": map[string]any{"content": v.Text}}}
+	case "relation":
+		refs := make([]any, len(v.Pages))
+		for i, id := range v.Pages {
+			refs[i] = map[string]any{"id": id}
+		}
+
+		return refs
+	case "multi_select":
+		opts := make([]any, len(v.Names))
+		for i, n := range v.Names {
+			opts[i] = named(n)
+		}
+
+		return opts
+	default: // status, select
+		if len(v.Names) == 0 {
+			return nil
+		}
+
+		return named(v.Names[0])
+	}
 }
 
 // PageMarkdown retrieves a page's body as markdown.

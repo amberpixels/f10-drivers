@@ -30,10 +30,10 @@ var wantTypes = map[string][]string{
 
 // Tracker is the Notion contract.Tracker.
 type Tracker struct {
-	client *Client
-	cfg    *config.Config
-	n      *config.Notion
-	warn   io.Writer
+	b    backend
+	cfg  *config.Config
+	n    *config.Notion
+	warn io.Writer
 
 	ds    *DataSource
 	props config.Properties // the configured names, title filled in from the schema
@@ -45,24 +45,59 @@ var (
 	_ contract.Creator = (*Tracker)(nil)
 )
 
-// New returns the tracker for cfg. baseURL overrides the API root (tests,
-// proxies); warn receives non-fatal notices such as a truncated body.
-func New(cfg *config.Config, baseURL string, warn io.Writer) (*Tracker, error) {
+// backend is the way into Notion: the REST API with an integration token,
+// or the hosted MCP server as the logged-in user.
+type backend interface {
+	Database(ctx context.Context, id string) (*Database, error)
+	DataSource(ctx context.Context, id string) (*DataSource, error)
+	// Query returns the first page of matches, or with all set every match;
+	// a backend that cannot page returns an error wrapping
+	// contract.ErrUnsupported when more remain.
+	Query(ctx context.Context, dataSource string, q Query, all bool) ([]Page, error)
+	Page(ctx context.Context, id string) (*Page, error)
+	PageMarkdown(ctx context.Context, id string) (*Markdown, error)
+	Comments(ctx context.Context, pageID string) ([]Comment, error)
+	CreatePage(ctx context.Context, p Draft) (*Page, error)
+}
+
+// Endpoints override where each way in reaches Notion (tests, proxies).
+type Endpoints struct {
+	API string // the REST API root
+	MCP string // the MCP server url
+}
+
+// New returns the tracker for cfg over its configured transport; warn
+// receives non-fatal notices such as a truncated body.
+func New(ctx context.Context, cfg *config.Config, ep Endpoints, warn io.Writer) (*Tracker, error) {
 	if cfg.Notion == nil {
 		return nil, fmt.Errorf("%s has no [notion] table", cfg.Path)
 	}
 
-	token, err := cfg.Notion.Token()
-	if err != nil {
-		return nil, err
+	var b backend
+
+	switch cfg.Notion.Transport {
+	case config.TransportMCP:
+		m, err := newMCPBackend(ctx, cfg, ep.MCP, warn)
+		if err != nil {
+			return nil, err
+		}
+
+		b = m
+	default:
+		token, err := cfg.Notion.Token()
+		if err != nil {
+			return nil, err
+		}
+
+		b = NewClient(ep.API, token)
 	}
 
 	return &Tracker{
-		client: NewClient(baseURL, token),
-		cfg:    cfg,
-		n:      cfg.Notion,
-		warn:   warn,
-		ids:    map[string]string{},
+		b:    b,
+		cfg:  cfg,
+		n:    cfg.Notion,
+		warn: warn,
+		ids:  map[string]string{},
 	}, nil
 }
 
@@ -74,7 +109,7 @@ func (t *Tracker) Read(ctx context.Context, number string) (string, error) {
 		return "", err
 	}
 
-	md, err := t.client.PageMarkdown(ctx, p.ID)
+	md, err := t.b.PageMarkdown(ctx, p.ID)
 	if err != nil {
 		return "", err
 	}
@@ -88,7 +123,7 @@ func (t *Tracker) Read(ctx context.Context, number string) (string, error) {
 		_, _ = fmt.Fprintf(t.warn, "warn: %s has %d block(s) Notion could not render as markdown\n", id, n)
 	}
 
-	comments, err := t.client.Comments(ctx, p.ID)
+	comments, err := t.b.Comments(ctx, p.ID)
 	if err != nil {
 		return "", err
 	}
@@ -170,7 +205,7 @@ func (t *Tracker) Index(ctx context.Context) (string, error) {
 		db = ds.Parent.DatabaseID
 	}
 
-	d, err := t.client.Database(ctx, db)
+	d, err := t.b.Database(ctx, db)
 	if err != nil {
 		return "", err
 	}
@@ -184,19 +219,15 @@ func (t *Tracker) List(ctx context.Context) ([]contract.Row, error) {
 		return nil, err
 	}
 
-	var filter any
+	var q Query
 
 	if t.props.Status != "" {
-		var notDone []any
-
 		for _, s := range t.n.Done {
-			notDone = append(notDone, t.propFilter(t.props.Status, "does_not_equal", s))
+			q.Filters = append(q.Filters, t.filter(t.props.Status, OpNotEquals, s))
 		}
-
-		filter = and(notDone)
 	}
 
-	return t.rows(ctx, Query{Filter: filter})
+	return t.rows(ctx, q)
 }
 
 // Search returns the tasks whose title contains the query, any status.
@@ -205,12 +236,12 @@ func (t *Tracker) Search(ctx context.Context, query string) ([]contract.Row, err
 		return nil, err
 	}
 
-	var filter any
+	var q Query
 	if query != "" {
-		filter = map[string]any{"property": t.props.Title, "title": map[string]any{"contains": query}}
+		q.Filters = []Filter{t.filter(t.props.Title, OpContains, query)}
 	}
 
-	return t.rows(ctx, Query{Filter: filter})
+	return t.rows(ctx, q)
 }
 
 // Children returns the tasks whose parent relation holds this task. Without
@@ -225,9 +256,7 @@ func (t *Tracker) Children(ctx context.Context, number string) ([]contract.Child
 		return nil, err
 	}
 
-	pages, err := t.client.Query(ctx, t.ds.ID, Query{
-		Filter: map[string]any{"property": t.props.Parent, "relation": map[string]any{"contains": p.ID}},
-	}, true)
+	pages, err := t.b.Query(ctx, t.ds.ID, Query{Filters: []Filter{t.filter(t.props.Parent, OpContains, p.ID)}}, true)
 	if err != nil {
 		return nil, err
 	}
@@ -272,9 +301,7 @@ func (t *Tracker) Create(ctx context.Context, task contract.NewTask) (string, er
 		_, _ = fmt.Fprintf(t.warn, "warn: --%s dropped: create does not know it\n", name)
 	}
 
-	props := map[string]any{
-		t.props.Title: map[string]any{"title": []any{map[string]any{"text": map[string]any{"content": task.Title}}}},
-	}
+	props := map[string]Value{t.props.Title: {Type: "title", Text: task.Title}}
 
 	for _, f := range []struct{ flag, value, prop string }{
 		{"status", task.Status, t.props.Status},
@@ -289,16 +316,16 @@ func (t *Tracker) Create(ctx context.Context, task contract.NewTask) (string, er
 			return "", err
 		}
 
-		props[f.prop] = map[string]any{ds.Properties[f.prop].Type: map[string]any{"name": name}}
+		props[f.prop] = Value{Type: ds.Properties[f.prop].Type, Names: []string{name}}
 	}
 
 	if len(task.Labels) > 0 && t.configured("label", t.props.Labels) {
-		v, err := t.labelsValue(task.Labels)
+		names, err := t.labelNames(task.Labels)
 		if err != nil {
 			return "", err
 		}
 
-		props[t.props.Labels] = v
+		props[t.props.Labels] = Value{Type: ds.Properties[t.props.Labels].Type, Names: names}
 	}
 
 	for _, f := range []struct{ flag, number, prop string }{
@@ -314,14 +341,10 @@ func (t *Tracker) Create(ctx context.Context, task contract.NewTask) (string, er
 			return "", fmt.Errorf("--%s: %w", f.flag, err)
 		}
 
-		props[f.prop] = map[string]any{"relation": []any{map[string]any{"id": p.ID}}}
+		props[f.prop] = Value{Type: "relation", Pages: []string{p.ID}}
 	}
 
-	page, err := t.client.CreatePage(ctx, NewPage{
-		Parent:     PageParent{Type: "data_source_id", DataSourceID: ds.ID},
-		Properties: props,
-		Markdown:   task.Body,
-	})
+	page, err := t.b.CreatePage(ctx, Draft{DataSource: ds.ID, Properties: props, Markdown: task.Body})
 
 	if _, ok := errors.AsType[*UnknownOutcomeError](err); ok {
 		return "", fmt.Errorf(
@@ -373,12 +396,12 @@ func (t *Tracker) optionFor(flag, value string) (string, error) {
 	return "", fmt.Errorf("--%s %q: no option of %q matches (%s)", flag, value, prop, strings.Join(names, ", "))
 }
 
-// labelsValue checks each label is an option of the labels property and
-// builds its value; a select property holds one label.
-func (t *Tracker) labelsValue(labels []string) (any, error) {
+// labelNames checks each label is an option of the labels property and
+// returns the options' exact names; a select property holds one label.
+func (t *Tracker) labelNames(labels []string) ([]string, error) {
 	prop := t.props.Labels
 	names := options(t.ds.Properties[prop])
-	exact := make([]any, 0, len(labels))
+	exact := make([]string, 0, len(labels))
 
 	for _, l := range labels {
 		j := indexFold(names, l)
@@ -386,18 +409,14 @@ func (t *Tracker) labelsValue(labels []string) (any, error) {
 			return nil, fmt.Errorf("--label %q is not an option of %q (%s)", l, prop, strings.Join(names, ", "))
 		}
 
-		exact = append(exact, map[string]any{"name": names[j]})
+		exact = append(exact, names[j])
 	}
 
-	if t.ds.Properties[prop].Type == "select" {
-		if len(exact) > 1 {
-			return nil, fmt.Errorf("--label: %q is a select property and holds one label, got %d", prop, len(exact))
-		}
-
-		return map[string]any{"select": exact[0]}, nil
+	if t.ds.Properties[prop].Type == "select" && len(exact) > 1 {
+		return nil, fmt.Errorf("--label: %q is a select property and holds one label, got %d", prop, len(exact))
 	}
 
-	return map[string]any{"multi_select": exact}, nil
+	return exact, nil
 }
 
 // endsWithLine reports whether text's last line is line, ignoring
@@ -409,7 +428,7 @@ func endsWithLine(text, line string) bool {
 }
 
 func (t *Tracker) rows(ctx context.Context, q Query) ([]contract.Row, error) {
-	pages, err := t.client.Query(ctx, t.ds.ID, q, false)
+	pages, err := t.b.Query(ctx, t.ds.ID, q, false)
 	if err != nil {
 		return nil, err
 	}
@@ -481,10 +500,7 @@ func (t *Tracker) find(ctx context.Context, number string) (*Page, error) {
 		return nil, fmt.Errorf("task number %q: %w", number, err)
 	}
 
-	pages, err := t.client.Query(ctx, ds.ID, Query{
-		Filter:   map[string]any{"property": t.props.ID, "unique_id": map[string]any{"equals": n}},
-		PageSize: 1,
-	}, false)
+	pages, err := t.b.Query(ctx, ds.ID, Query{Filters: []Filter{t.filter(t.props.ID, OpEquals, n)}, PageSize: 1}, false)
 	if err != nil {
 		return nil, err
 	}
@@ -508,7 +524,7 @@ func (t *Tracker) dataSource(ctx context.Context) (*DataSource, error) {
 
 	id := t.n.DataSource
 	if id == "" {
-		db, err := t.client.Database(ctx, t.n.Database)
+		db, err := t.b.Database(ctx, t.n.Database)
 		if err != nil {
 			return nil, err
 		}
@@ -529,7 +545,7 @@ func (t *Tracker) dataSource(ctx context.Context) (*DataSource, error) {
 		}
 	}
 
-	ds, err := t.client.DataSource(ctx, id)
+	ds, err := t.b.DataSource(ctx, id)
 	if err != nil {
 		return nil, err
 	}
@@ -632,21 +648,9 @@ func indexFold(names []string, v string) int {
 	return slices.IndexFunc(names, func(n string) bool { return strings.EqualFold(n, v) })
 }
 
-// propFilter builds a filter on a status or select property, whichever the
-// schema says it is.
-func (t *Tracker) propFilter(name, op, value string) map[string]any {
-	return map[string]any{"property": name, t.ds.Properties[name].Type: map[string]any{op: value}}
-}
-
-func and(filters []any) any {
-	switch len(filters) {
-	case 0:
-		return nil
-	case 1:
-		return filters[0]
-	default:
-		return map[string]any{"and": filters}
-	}
+// filter builds a filter on a property, typed as the schema says it is.
+func (t *Tracker) filter(name string, op Op, value any) Filter {
+	return Filter{Property: name, Type: t.ds.Properties[name].Type, Op: op, Value: value}
 }
 
 func (t *Tracker) remember(pages []Page) {
@@ -686,7 +690,7 @@ func (t *Tracker) prefetchAfter(ctx context.Context, pages []Page) error {
 	for range min(fetchers, len(missing)) {
 		wg.Go(func() {
 			for id := range next {
-				p, err := t.client.Page(ctx, id)
+				p, err := t.b.Page(ctx, id)
 
 				mu.Lock()
 				switch {
@@ -719,7 +723,7 @@ func (t *Tracker) idOf(ctx context.Context, pageID string) (string, error) {
 		return id, nil
 	}
 
-	p, err := t.client.Page(ctx, pageID)
+	p, err := t.b.Page(ctx, pageID)
 	if isNotFound(err) {
 		t.ids[normalize(pageID)] = ""
 

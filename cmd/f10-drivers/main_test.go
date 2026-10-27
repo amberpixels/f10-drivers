@@ -1,7 +1,9 @@
 package main_test
 
 import (
+	"bufio"
 	"flag"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -74,6 +76,15 @@ func project(t *testing.T, cfg string, env ...string) conformance.Runner {
 func projectOn(t *testing.T, srv *notiontest.Server, cfg string, env ...string) conformance.Runner {
 	t.Helper()
 
+	run, _ := projectIn(t, srv, cfg, env...)
+
+	return run
+}
+
+// projectIn is projectOn, also returning the checkout root.
+func projectIn(t *testing.T, srv *notiontest.Server, cfg string, env ...string) (conformance.Runner, string) {
+	t.Helper()
+
 	root := t.TempDir()
 	storage := filepath.Join(root, ".f10")
 
@@ -88,7 +99,7 @@ func projectOn(t *testing.T, srv *notiontest.Server, cfg string, env ...string) 
 	env = append([]string{"MKT_NOTION_TOKEN=" + notiontest.Token, "F10_DRIVERS_NOTION_API=" + srv.URL},
 		slices.DeleteFunc(env, func(e string) bool { return e == "" })...)
 
-	return conformance.Command(filepath.Join(storage, "driver"), root, env...)
+	return conformance.Command(filepath.Join(storage, "driver"), root, env...), root
 }
 
 func write(t *testing.T, path, content string, mode os.FileMode) {
@@ -416,4 +427,280 @@ func TestConformanceAcceptsADriverThatDeclinesCreate(t *testing.T) {
 	}
 
 	conformance.Check(t, declining, conformance.Fixture{Task: "2", Parent: "2", Missing: "99", Query: "summary"})
+}
+
+// The MCP way in: the same config with transport = "mcp" and no token.
+var mcpConfig = strings.Replace(notionConfig, `token_env = "MKT_NOTION_TOKEN"`, `transport = "mcp"`, 1)
+
+// mcpProject is a project on srv's MCP face, with a home of its own for the
+// login. It logs in first unless told not to.
+func mcpProject(t *testing.T, srv *notiontest.Server, cfg string, login bool) (conformance.Runner, string, string) {
+	t.Helper()
+
+	home := t.TempDir()
+	env := []string{
+		"F10_DRIVERS_NOTION_MCP=" + srv.MCPURL(), "F10_DRIVERS_TOKEN_STORE=file", "F10_DRIVERS_NO_BROWSER=1",
+		"HOME=" + home, "XDG_CONFIG_HOME=" + filepath.Join(home, ".config"),
+	}
+
+	run, root := projectIn(t, srv, cfg, env...)
+
+	if login {
+		loginAt(t, root, env)
+	}
+
+	return run, home, root
+}
+
+// loginAt runs `notion login` and approves it the way a user's browser
+// does: it opens the printed url, which the fake redirects to the callback.
+func loginAt(t *testing.T, root string, env []string) {
+	t.Helper()
+
+	cmd := exec.CommandContext(t.Context(), filepath.Join(root, ".f10", "driver"), "login")
+	cmd.Dir = root
+	cmd.Env = append(cmd.Environ(), env...)
+
+	var stderr strings.Builder
+
+	cmd.Stderr = &stderr
+
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	var printed strings.Builder
+
+	sc := bufio.NewScanner(out)
+	for sc.Scan() {
+		line := sc.Text()
+		printed.WriteString(line + "\n")
+
+		if strings.HasPrefix(line, "http") {
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, line, http.NoBody)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			_ = resp.Body.Close()
+		}
+	}
+
+	if err := cmd.Wait(); err != nil || !strings.Contains(printed.String(), "Logged in to ") {
+		t.Fatalf("login: %v, stdout %q, stderr %q", err, printed.String(), stderr.String())
+	}
+}
+
+func TestNotionMCPConformance(t *testing.T) {
+	run, _, _ := mcpProject(t, notiontest.New(t), strings.Replace(mcpConfig, "%s", relations, 1), true)
+	conformance.Check(t, run, conformance.Fixture{
+		Task: "2", Parent: "2", Missing: "99", Query: "summary", Implements: []string{"create"},
+	})
+}
+
+// TestNotionMCPAnswers pins that MCP answers what the REST path answers,
+// but for app.notion.com urls, and no created in list and search: rows mode
+// carries it only from a created_time property, which the fixture lacks.
+func TestNotionMCPAnswers(t *testing.T) {
+	run, _, _ := mcpProject(t, notiontest.New(t), strings.Replace(mcpConfig, "%s", relations, 1), true)
+
+	for _, tc := range []struct{ golden, verb, arg string }{
+		{"read-2.md", "read", "2"},
+		{"read-4.mcp.md", "read", "4"},
+		{"list.mcp.json", "list", ""},
+		{"search.mcp.json", "search", "summary"},
+		{"children-2.mcp.json", "children", "2"},
+		{"branch-3.txt", "branch", "3"},
+		{"url-3.mcp.txt", "url", "3"},
+		{"index.mcp.txt", "index", ""},
+	} {
+		t.Run(tc.golden, func(t *testing.T) {
+			args := []string{tc.verb}
+			if tc.arg != "" {
+				args = append(args, tc.arg)
+			}
+
+			res := run(t, "", args...)
+			if res.Code != 0 {
+				t.Fatalf("exit %d: %s", res.Code, res.Stderr)
+			}
+
+			golden(t, tc.golden, res.Stdout)
+		})
+	}
+}
+
+func TestNotionMCPCreate(t *testing.T) {
+	srv := notiontest.New(t)
+	run, _, _ := mcpProject(t, srv, strings.Replace(mcpConfig, "%s", relations, 1), true)
+
+	res := run(t, newTask, "create", "--status", "in progress", "--priority", "urgent",
+		"--label", "launch", "--label", "Report", "--parent", "2", "--after", "3")
+	if res.Code != 0 || res.Stdout != "MKT-6\n" || res.Stderr != "" {
+		t.Fatalf("exit %d, stdout %q, stderr %q", res.Code, res.Stdout, res.Stderr)
+	}
+
+	res = run(t, "", "read", "6")
+	if res.Code != 0 {
+		t.Fatalf("read: exit %d: %s", res.Code, res.Stderr)
+	}
+
+	golden(t, "create-read.md", res.Stdout)
+
+	if srv.Creates() != 1 {
+		t.Errorf("notion-create-pages called %d times, want 1", srv.Creates())
+	}
+}
+
+func TestNotionMCPCreateNeverRetriesServerErrors(t *testing.T) {
+	srv := notiontest.New(t)
+	run, _, _ := mcpProject(t, srv, strings.Replace(mcpConfig, "%s", relations, 1), true)
+	srv.CreateStatus = 502
+
+	res := run(t, "# T", "create")
+
+	want := "the task may have been created: check https://www.notion.so/" + notiontest.DatabaseID
+	if res.Code == 0 || !strings.Contains(res.Stderr, want) || srv.Creates() != 1 {
+		t.Fatalf("want one call and a failure naming %q, got exit %d, %d call(s), stderr %q",
+			want, res.Code, srv.Creates(), res.Stderr)
+	}
+}
+
+// TestNotionMCPLoginStaysOutOfTheProject logs in and checks the tokens live
+// in a 0600 file under the user's config dir, and nowhere in the project.
+func TestNotionMCPLoginStaysOutOfTheProject(t *testing.T) {
+	srv := notiontest.New(t)
+	run, home, root := mcpProject(t, srv, strings.Replace(mcpConfig, "%s", "", 1), true)
+
+	if res := run(t, "", "index"); res.Code != 0 {
+		t.Fatalf("index: exit %d: %s", res.Code, res.Stderr)
+	}
+
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+
+		data, err := os.ReadFile(path)
+		if err == nil && (strings.Contains(string(data), "access-") || strings.Contains(string(data), "refresh-")) {
+			t.Errorf("%s holds a token", path)
+		}
+
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var stored []string
+
+	err = filepath.WalkDir(home, func(path string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && d.Name() == "notion-logins.json" {
+			stored = append(stored, path)
+		}
+
+		return err
+	})
+	if err != nil || len(stored) != 1 {
+		t.Fatalf("want one login file under the home, got %v (%v)", stored, err)
+	}
+
+	if info, err := os.Stat(stored[0]); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("login file mode: %v, %v", info.Mode(), err)
+	}
+
+	if srv.Authorizations() != 1 {
+		t.Errorf("authorize hit %d times, want 1 (the login)", srv.Authorizations())
+	}
+}
+
+func TestNotionMCPRefreshesAnExpiredToken(t *testing.T) {
+	srv := notiontest.New(t)
+	run, _, _ := mcpProject(t, srv, strings.Replace(mcpConfig, "%s", "", 1), true)
+	srv.ExpireAccess()
+
+	for range 2 { // the second run reads the refreshed token back from the store
+		if res := run(t, "", "list"); res.Code != 0 {
+			t.Fatalf("list after expiry: exit %d: %s", res.Code, res.Stderr)
+		}
+	}
+
+	if srv.Authorizations() != 1 {
+		t.Errorf("authorize hit %d times, want 1: a refresh needs no new login", srv.Authorizations())
+	}
+}
+
+func TestNotionMCPRevokedLoginNamesTheLoginCommand(t *testing.T) {
+	srv := notiontest.New(t)
+	run, _, _ := mcpProject(t, srv, strings.Replace(mcpConfig, "%s", "", 1), true)
+	srv.RevokeRefresh()
+
+	res := run(t, "", "list")
+	if res.Code == 0 || res.Code == 3 || !strings.Contains(res.Stderr, "run f10-drivers notion login") {
+		t.Fatalf("want a failure naming the login command, got exit %d, stderr %q", res.Code, res.Stderr)
+	}
+}
+
+func TestNotionMCPWithoutLoginNeverOpensABrowser(t *testing.T) {
+	srv := notiontest.New(t)
+	run, _, _ := mcpProject(t, srv, strings.Replace(mcpConfig, "%s", "", 1), false)
+
+	res := run(t, "", "list")
+	if res.Code == 0 || !strings.Contains(res.Stderr, "no Notion login: run f10-drivers notion login") {
+		t.Fatalf("want a failure naming the login command, got exit %d, stderr %q", res.Code, res.Stderr)
+	}
+
+	if srv.Authorizations() != 0 || srv.ToolCalls("notion-query-data-sources") != 0 {
+		t.Errorf("a verb without a login reached the server: %d authorize, %d queries",
+			srv.Authorizations(), srv.ToolCalls("notion-query-data-sources"))
+	}
+}
+
+func TestNotionMCPLogout(t *testing.T) {
+	run, _, _ := mcpProject(t, notiontest.New(t), strings.Replace(mcpConfig, "%s", "", 1), true)
+
+	if res := run(t, "", "logout"); res.Code != 0 || !strings.Contains(res.Stdout, "Logged out of ") {
+		t.Fatalf("logout: exit %d, stdout %q, stderr %q", res.Code, res.Stdout, res.Stderr)
+	}
+
+	if res := run(t, "", "list"); res.Code == 0 || !strings.Contains(res.Stderr, "no Notion login") {
+		t.Fatalf("list after logout: exit %d, stderr %q", res.Code, res.Stderr)
+	}
+}
+
+// TestNotionMCPChildrenPastOnePageDeclines: rows mode has no cursor, so a
+// children answer that would be cut short declines instead.
+func TestNotionMCPChildrenPastOnePageDeclines(t *testing.T) {
+	srv := notiontest.New(t)
+	srv.RowLimit = 1
+	run, _, _ := mcpProject(t, srv, strings.Replace(mcpConfig, "%s", relations, 1), true)
+
+	res := run(t, "", "children", "2")
+	if res.Code != 3 || res.Stdout != "" || !strings.Contains(res.Stderr, "cannot page past them") {
+		t.Fatalf("want exit 3 with a warning, got exit %d, stdout %q, stderr %q", res.Code, res.Stdout, res.Stderr)
+	}
+}
+
+func TestNotionMCPConfigRefusesTokenEnv(t *testing.T) {
+	cfg := strings.Replace(
+		strings.Replace(mcpConfig, "%s", "", 1),
+		`transport = "mcp"`,
+		"transport = \"mcp\"\ntoken_env = \"T\"",
+		1,
+	)
+
+	res := project(t, cfg)(t, "", "list")
+	if res.Code == 0 || !strings.Contains(res.Stderr, `notion.token_env applies only to transport = "api"`) {
+		t.Fatalf("exit %d, stderr %q", res.Code, res.Stderr)
+	}
 }

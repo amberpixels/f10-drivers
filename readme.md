@@ -21,7 +21,8 @@ A project carries a one-line shim and a small TOML file, and no code.
 
 | tracker | verbs |
 |---|---|
-| Notion | `read`, `url`, `search`, `list`, `index`, `branch`, `children`, `create` |
+| Notion, REST API | `read`, `url`, `search`, `list`, `index`, `branch`, `children`, `create` |
+| Notion, hosted MCP server | the same, with `children` declining past 100 subtasks |
 
 ## Install
 
@@ -59,11 +60,26 @@ The **Create** adapter under `## Tracker` in `project.md` is only needed for a d
 
 ## Notion
 
-### Setup
+The driver reaches Notion one of two ways, picked by `transport` in `driver.toml`:
+
+- `api` (the default): the REST API, with an internal integration's token in an env var.
+- `mcp`: Notion's hosted MCP server (`https://mcp.notion.com/mcp`), as the user who logged in. Use it where the workspace does not let you add an integration.
+
+### Setup over the API
 
 1. Create an internal integration at notion.so/profile/integrations and copy its token into an env var (`NOTION_TOKEN` by default). Never put it in the repo.
 2. Share the tasks database with the integration (the database's `...` menu, Connections).
 3. Give the database a **Unique ID** property with the project's prefix (`MKT`). Its number is the task number f10 passes the driver.
+
+### Setup over MCP
+
+1. Set `transport = "mcp"` under `[notion]`, and leave out `token_env`.
+2. Run `f10-drivers notion login` once per user. It opens Notion in the browser, registers f10-drivers as an OAuth client, and stores the tokens in the OS keychain. Without a usable keychain they go in a `0600` file under the user config dir (`notion-logins.json` in `f10-drivers/`); the login line says which. Nothing is written under the project.
+3. Give the database a **Unique ID** property, as above. The login sees what the user sees, so there is nothing to share.
+
+An expired access token is refreshed on its own.
+A verb with no login, or with one Notion has revoked, fails with a message naming `f10-drivers notion login`; it never opens a browser.
+`f10-drivers notion logout` revokes the login and forgets it.
 
 ### `driver.toml`
 
@@ -72,7 +88,8 @@ prefix = "MKT"                    # task ids are MKT-<number>
 branch = "{id}/{slug}"            # optional; {id}, {number}, {slug}
 
 [notion]
-token_env = "NOTION_TOKEN"        # optional; the env var holding the token
+# transport = "mcp"               # optional; "api" by default
+token_env = "NOTION_TOKEN"        # optional, api only; the env var holding the token
 database = "https://www.notion.so/team/Tasks-1a2b3c4d00004000800000000000db01"
 # data_source = "..."             # only when the database has several
 done = ["Done", "Cancelled"]      # optional; status options that close a task
@@ -99,6 +116,7 @@ Every key but `prefix`, `notion.database` (or `notion.data_source`) and `notion.
 The driver fails with a message naming the problem on:
 
 - an unknown key
+- a `transport` other than `api` or `mcp`, or `token_env` set with `mcp`
 - a priority level outside `urgent`, `high`, `medium`, `low`
 - a property the database does not have, or one of the wrong type
 - a `done` value that is not an option of the status property
@@ -128,6 +146,22 @@ Its flags map through `[notion.properties]`:
 A value the schema does not allow fails before the page is created, naming the property and its options.
 `create` retries only a 429. A 5xx or a lost connection is not retried, and the error says the task may have been created and names the database to check.
 
+### Over MCP
+
+Every verb answers as above, with these differences, all from what Notion's MCP tools return:
+
+| verb | over MCP |
+|---|---|
+| `children <n>` | declines (exit 3, a warning on stderr) when more than 100 tasks match: the MCP query has no cursor |
+| `list`, `search` | rows carry `created` only when the database has a Created time property |
+| `read <n>` | the body is Notion-flavored markdown; a comment's author is the user's name, else their email |
+| every verb | urls are `app.notion.com/p/...` links |
+
+Every verb but `index` runs a rows-mode query, which Notion limits per workspace below the Business plan: a few dozen an hour. Past it the verb fails with `usage_limit_reached` until the hour resets. For heavy use, `transport = "api"` has no such limit.
+
+`create` sends one `notion-create-pages` call and is not retried past a 429, as over the API.
+The MCP tools answer text meant for an LLM, not a versioned API. The driver parses each answer's shape and fails with a message naming the tool when it changes.
+
 Images stay links, signed urls included: f10 downloads them itself.
 A body Notion cuts short, or blocks it cannot render, gets a line in the answer pointing at the full page, and a warning on stderr.
 `read` prints page-level comments; discussions on single blocks are not read.
@@ -138,7 +172,7 @@ A body Notion cuts short, or blocks it cannot render, gets a line in the answer 
 That includes `create`, followed by a `read` of the new task, so point it at a fake or a scratch database; a driver that declines `create` passes.
 It wants one line for a url or a branch, a JSON array of rows with the required fields, priorities in the vocabulary and RFC 3339 times.
 A declined verb must exit 3; a missing task must exit non-zero with stderr.
-The Notion driver runs it against a fake Notion API (`notion/notiontest`) through the same shim a project uses.
+The Notion driver runs it over both ways in, against a fake Notion API and a fake MCP server with its OAuth endpoints (`notion/notiontest`), through the same shim a project uses.
 A new tracker passes its own fixtures to the same check.
 
 ## Development
@@ -149,7 +183,8 @@ just lint    # standardgo
 just build   # bin/f10-drivers
 ```
 
-Tests point the driver at a fake Notion API through `F10_DRIVERS_NOTION_API`, which accepts only a loopback url.
+Tests point the driver at a fake Notion API through `F10_DRIVERS_NOTION_API`, and at a fake MCP server through `F10_DRIVERS_NOTION_MCP`; both accept only a loopback url.
+`F10_DRIVERS_TOKEN_STORE=file` keeps logins out of the OS keychain, and `F10_DRIVERS_NO_BROWSER` makes `login` only print its url.
 
 ## License
 
