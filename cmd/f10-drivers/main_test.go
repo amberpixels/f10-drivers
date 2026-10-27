@@ -101,7 +101,9 @@ func write(t *testing.T, path, content string, mode os.FileMode) {
 
 func TestNotionConformance(t *testing.T) {
 	run := project(t, strings.Replace(notionConfig, "%s", relations, 1))
-	conformance.Check(t, run, conformance.Fixture{Task: "2", Parent: "2", Missing: "99", Query: "summary"})
+	conformance.Check(t, run, conformance.Fixture{
+		Task: "2", Parent: "2", Missing: "99", Query: "summary", Implements: []string{"create"},
+	})
 }
 
 func TestNotionWithoutRelationsDeclinesChildren(t *testing.T) {
@@ -131,7 +133,7 @@ func TestNotionAnswers(t *testing.T) {
 				args = append(args, tc.arg)
 			}
 
-			res := run(t, args...)
+			res := run(t, "", args...)
 			if res.Code != 0 {
 				t.Fatalf("exit %d: %s", res.Code, res.Stderr)
 			}
@@ -144,7 +146,7 @@ func TestNotionAnswers(t *testing.T) {
 func TestNotionWarnsOnTruncatedBody(t *testing.T) {
 	run := project(t, strings.Replace(notionConfig, "%s", relations, 1))
 
-	res := run(t, "read", "4")
+	res := run(t, "", "read", "4")
 	for _, want := range []string{"MKT-4 is too long", "1 block(s) Notion could not render"} {
 		if !strings.Contains(res.Stderr, want) {
 			t.Errorf("stderr lacks %q:\n%s", want, res.Stderr)
@@ -164,7 +166,7 @@ func TestConfigErrors(t *testing.T) {
 		{"bad token", notionConfig, "MKT_NOTION_TOKEN=wrong", "notion: unauthorized: API token is invalid."},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			res := project(t, strings.Replace(tc.cfg, "%s", "", 1), tc.env)(t, "list")
+			res := project(t, strings.Replace(tc.cfg, "%s", "", 1), tc.env)(t, "", "list")
 			if res.Code == 0 || !strings.Contains(res.Stderr, tc.want) {
 				t.Fatalf("want a failure naming %q, got exit %d, stderr %q", tc.want, res.Code, res.Stderr)
 			}
@@ -183,7 +185,7 @@ func TestNotionFollowsCursors(t *testing.T) {
 		{"children-2.json", "children", "2"},
 		{"read-2.md", "read", "2"},
 	} {
-		res := run(t, tc.verb, tc.arg)
+		res := run(t, "", tc.verb, tc.arg)
 		if res.Code != 0 {
 			t.Fatalf("%s: exit %d: %s", tc.verb, res.Code, res.Stderr)
 		}
@@ -191,7 +193,7 @@ func TestNotionFollowsCursors(t *testing.T) {
 		golden(t, tc.golden, res.Stdout)
 	}
 
-	res := run(t, "list")
+	res := run(t, "", "list")
 	if res.Code != 0 || strings.Count(res.Stdout, `"id":`) != 1 {
 		t.Fatalf("list should answer its first page only, got exit %d: %s", res.Code, res.Stdout)
 	}
@@ -203,7 +205,7 @@ func TestNotionDoneMatchesTheOptionsSpelling(t *testing.T) {
 		strings.Replace(strings.Replace(notionConfig, "%s", relations, 1), `done = ["Done"]`, `done = ["done"]`, 1),
 	)
 
-	res := run(t, "list")
+	res := run(t, "", "list")
 	if res.Code != 0 || strings.Contains(res.Stdout, `"id":"MKT-1"`) ||
 		strings.Contains(res.Stdout, `"status":"Done"`) {
 		t.Fatalf(
@@ -218,7 +220,7 @@ func TestNotionDoneMatchesTheOptionsSpelling(t *testing.T) {
 func TestAPIOverrideMustBeLoopback(t *testing.T) {
 	run := project(t, strings.Replace(notionConfig, "%s", "", 1), "F10_DRIVERS_NOTION_API=https://api.example.com/v1")
 
-	res := run(t, "list")
+	res := run(t, "", "list")
 	if res.Code == 0 || !strings.Contains(res.Stderr, "must be a loopback url") {
 		t.Fatalf("want the override refused, got exit %d, stderr %q", res.Code, res.Stderr)
 	}
@@ -226,7 +228,7 @@ func TestAPIOverrideMustBeLoopback(t *testing.T) {
 
 func TestUsage(t *testing.T) {
 	for _, args := range [][]string{{}, {"notion"}, {"jira", "read", "1"}} {
-		res := conformance.Command(binary, t.TempDir())(t, args...)
+		res := conformance.Command(binary, t.TempDir())(t, "", args...)
 		if res.Code != 2 || !strings.Contains(res.Stderr, "usage:") {
 			t.Errorf("%v: want exit 2 with usage, got %d, %q", args, res.Code, res.Stderr)
 		}
@@ -234,7 +236,7 @@ func TestUsage(t *testing.T) {
 }
 
 func TestVersion(t *testing.T) {
-	res := conformance.Command(binary, t.TempDir())(t, "--version")
+	res := conformance.Command(binary, t.TempDir())(t, "", "--version")
 	if res.Code != 0 || !strings.HasPrefix(res.Stdout, "f10-drivers ") {
 		t.Fatalf("want exit 0 with the version, got %d, %q", res.Code, res.Stdout)
 	}
@@ -258,4 +260,160 @@ func golden(t *testing.T, name, got string) {
 	if got != string(want) {
 		t.Errorf("%s differs:\n--- want\n%s\n--- got\n%s", name, want, got)
 	}
+}
+
+const newTask = "# Plan the launch email\n\nDraft the copy and pick the send date.\n\nAfter: MKT-3\n"
+
+// TestNotionCreate creates a task with every property and reads it back:
+// the same title and body, each property mapped through the config.
+func TestNotionCreate(t *testing.T) {
+	srv := notiontest.New(t)
+	run := projectOn(t, srv, strings.Replace(notionConfig, "%s", relations, 1))
+
+	res := run(t, newTask, "create", "--status", "in progress", "--priority", "urgent",
+		"--label", "launch", "--label", "Report", "--parent", "2", "--after", "3")
+	if res.Code != 0 || res.Stdout != "MKT-6\n" || res.Stderr != "" {
+		t.Fatalf("exit %d, stdout %q, stderr %q", res.Code, res.Stdout, res.Stderr)
+	}
+
+	res = run(t, "", "read", "6")
+	if res.Code != 0 {
+		t.Fatalf("read: exit %d: %s", res.Code, res.Stderr)
+	}
+
+	golden(t, "create-read.md", res.Stdout)
+
+	if res = run(t, "", "children", "2"); !strings.Contains(res.Stdout, `"id":"MKT-6"`) {
+		t.Errorf("children of MKT-2 lacks MKT-6: %s", res.Stdout)
+	}
+
+	if srv.Creates() != 1 {
+		t.Errorf("POST /pages sent %d times, want 1", srv.Creates())
+	}
+}
+
+// TestNotionCreatePriorityFallsBackToTheLevel maps a level whose configured
+// values are not options to the option named like the level.
+func TestNotionCreatePriorityFallsBackToTheLevel(t *testing.T) {
+	cfg := strings.Replace(strings.Replace(notionConfig, "%s", "", 1), `high = ["High", "P1"]`, `high = "P1"`, 1)
+	run := project(t, cfg)
+
+	if res := run(t, "# T", "create", "--priority", "high"); res.Code != 0 {
+		t.Fatalf("exit %d: %s", res.Code, res.Stderr)
+	}
+
+	if res := run(t, "", "read", "6"); !strings.Contains(res.Stdout, "Priority: high\n") {
+		t.Fatalf("read lacks the priority:\n%s", res.Stdout)
+	}
+}
+
+func TestNotionCreateRejectsBeforeSending(t *testing.T) {
+	base := strings.Replace(notionConfig, "%s", relations, 1)
+	// Status as the priority property has no option named like a level, and
+	// Priority as the labels property is a select.
+	swapped := strings.NewReplacer(`priority = "Priority"`, `priority = "Status"`,
+		`labels = "Tags"`, `labels = "Priority"`).Replace(base)
+
+	for _, tc := range []struct {
+		name, cfg string
+		args      []string
+		want      string
+	}{
+		{
+			"status", base,
+			[]string{"--status", "Blocked"},
+			`--status "Blocked": no option of "Status" matches (Not started, In progress, Done)`,
+		},
+		{
+			"label", base,
+			[]string{"--label", "launch", "--label", "ads"},
+			`--label "ads" is not an option of "Tags" (report, data, launch)`,
+		},
+		{"parent", base, []string{"--parent", "99"}, "--parent: MKT-99 not found"},
+		{"after", base, []string{"--after", "99"}, "--after: MKT-99 not found"},
+		{
+			"priority without an option", swapped,
+			[]string{"--priority", "urgent"},
+			`--priority "urgent": no option of "Status" matches (Not started, In progress, Done)`,
+		},
+		{
+			"two labels on a select", swapped,
+			[]string{"--label", "High", "--label", "Low"},
+			`--label: "Priority" is a select property and holds one label, got 2`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := notiontest.New(t)
+			run := projectOn(t, srv, tc.cfg)
+
+			res := run(t, "# T", append([]string{"create"}, tc.args...)...)
+			if res.Code == 0 || !strings.Contains(res.Stderr, tc.want) {
+				t.Fatalf("want a failure naming %q, got exit %d, stderr %q", tc.want, res.Code, res.Stderr)
+			}
+
+			if srv.Creates() != 0 {
+				t.Fatalf("POST /pages sent %d times, want none", srv.Creates())
+			}
+		})
+	}
+}
+
+// TestNotionCreateAfterWithoutTheLine prints the relation's After: line when
+// the body does not end with it.
+func TestNotionCreateAfterWithoutTheLine(t *testing.T) {
+	run := project(t, strings.Replace(notionConfig, "%s", relations, 1))
+
+	if res := run(t, "# T\n\nAfter: MKT-2 is not the blocker", "create", "--after", "3"); res.Code != 0 {
+		t.Fatalf("exit %d: %s", res.Code, res.Stderr)
+	}
+
+	res := run(t, "", "read", "6")
+	if !strings.HasSuffix(res.Stdout, "After: MKT-2 is not the blocker\n\nAfter: MKT-3\n") {
+		t.Fatalf("read should end with the body, then the relation's After: line:\n%s", res.Stdout)
+	}
+}
+
+func TestNotionCreateNeverRetriesServerErrors(t *testing.T) {
+	srv := notiontest.New(t)
+	srv.CreateStatus = 502
+	run := projectOn(t, srv, strings.Replace(notionConfig, "%s", relations, 1))
+
+	res := run(t, "# T", "create")
+
+	want := "the task may have been created: check https://www.notion.so/" + notiontest.DatabaseID
+	if res.Code == 0 || !strings.Contains(res.Stderr, want) || srv.Creates() != 1 {
+		t.Fatalf("want one request and a failure naming %q, got exit %d, %d request(s), stderr %q",
+			want, res.Code, srv.Creates(), res.Stderr)
+	}
+}
+
+func TestNotionCreateDropsUnconfiguredProperties(t *testing.T) {
+	run := project(t, strings.Replace(notionConfig, "%s", "", 1))
+
+	res := run(t, newTask, "create", "--parent", "2", "--after", "3", "--assignee", "ann")
+	if res.Code != 0 || !strings.Contains(res.Stderr, "warn: --parent dropped") ||
+		!strings.Contains(res.Stderr, "warn: --after dropped") ||
+		!strings.Contains(res.Stderr, "warn: --assignee dropped: create does not know it") {
+		t.Fatalf("exit %d, stderr %q", res.Code, res.Stderr)
+	}
+
+	// Without the relation the body's After: line is the only record of it.
+	if res = run(t, "", "read", "6"); !strings.Contains(res.Stdout, "After: MKT-3") {
+		t.Fatalf("read lost the After: line:\n%s", res.Stdout)
+	}
+}
+
+// TestConformanceAcceptsADriverThatDeclinesCreate runs the check against a
+// driver that answers every verb but create, with the fixture not listing it.
+func TestConformanceAcceptsADriverThatDeclinesCreate(t *testing.T) {
+	run := project(t, strings.Replace(notionConfig, "%s", relations, 1))
+	declining := func(t *testing.T, stdin string, args ...string) conformance.Result {
+		if len(args) > 0 && args[0] == "create" {
+			return conformance.Result{Code: 3}
+		}
+
+		return run(t, stdin, args...)
+	}
+
+	conformance.Check(t, declining, conformance.Fixture{Task: "2", Parent: "2", Missing: "99", Query: "summary"})
 }

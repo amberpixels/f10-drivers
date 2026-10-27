@@ -1,6 +1,6 @@
 // Command f10-drivers is a tracker driver for f10, configured per project:
 //
-//	f10-drivers <tracker> [--config <path>] <verb> [argument]
+//	f10-drivers <tracker> [--config <path>] <verb> [arguments]
 //
 // A project's .f10/driver is a one-line shim, `exec f10-drivers notion "$@"`,
 // and its facts live in .f10/driver.toml.
@@ -22,11 +22,12 @@ import (
 	"github.com/amberpixels/f10-drivers/notion"
 )
 
-const usage = `usage: f10-drivers <tracker> [--config <path>] <verb> [argument]
+const usage = `usage: f10-drivers <tracker> [--config <path>] <verb> [arguments]
        f10-drivers --version
 
 trackers: notion
-verbs:    read, url, search, branch, children, index, list
+verbs:    read, url, search, branch, children, index, list,
+          create [--status <s>] [--priority <p>] [--label <l>]... [--parent <n>] [--after <n>] < task.md
 config:   .f10/driver.toml under the working directory, unless --config names one`
 
 const exitUsage = 2
@@ -71,13 +72,13 @@ func version() string {
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	code := run(ctx, os.Args[1:], os.Stdout, os.Stderr)
+	code := run(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr)
 
 	stop()
 	os.Exit(code)
 }
 
-func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 1 && args[0] == "--version" {
 		_, _ = fmt.Fprintln(stdout, "f10-drivers", version())
 
@@ -91,10 +92,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 
-	verb, arg := inv.rest[0], ""
-	if len(inv.rest) > 1 {
-		arg = inv.rest[1]
-	}
+	verb, verbArgs := inv.rest[0], inv.rest[1:]
 
 	newTracker, ok := trackers[inv.tracker]
 	if !ok {
@@ -113,7 +111,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return fail(stderr, err)
 	}
 
-	err = contract.Serve(ctx, tracker, verb, arg, stdout)
+	err = contract.Serve(ctx, tracker, verb, verbArgs, stdin, stdout)
 	if errors.Is(err, contract.ErrUnsupported) {
 		return contract.ExitUnsupported
 	}
@@ -129,10 +127,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 type invocation struct {
 	tracker string
 	config  string   // --config, empty for the default path
-	rest    []string // the verb and its argument
+	rest    []string // the verb and its arguments
 }
 
-// parseArgs splits `<tracker> [--config <path>] <verb> [argument]`.
+// parseArgs splits `<tracker> [--config <path>] <verb> [arguments]`.
 func parseArgs(args []string) (invocation, error) {
 	var inv invocation
 

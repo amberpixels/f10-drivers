@@ -69,7 +69,20 @@
   "Tags": {
    "id": "T",
    "name": "Tags",
-   "type": "multi_select"
+   "type": "multi_select",
+   "multi_select": {
+    "options": [
+     {
+      "name": "report"
+     },
+     {
+      "name": "data"
+     },
+     {
+      "name": "launch"
+     }
+    ]
+   }
   },
   "Parent": {
    "id": "P",

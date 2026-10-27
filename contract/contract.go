@@ -2,14 +2,16 @@
 // amberpixels/f10) as Go: the verbs, the row shapes, the exit codes, and
 // Serve, which answers one verb from a Tracker.
 //
-// Drivers return data and never act: a url is printed, never opened; a
-// branch name is printed, never created.
+// Read verbs change nothing; write verbs change only the tracker. Neither
+// acts on the local machine: a url is printed, never opened; a branch name
+// is printed, never created.
 package contract
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"slices"
@@ -25,10 +27,12 @@ const (
 	VerbChildren = "children" // stdout: JSON rows, one subtask each
 	VerbIndex    = "index"    // stdout: one url, the task list; no argument
 	VerbList     = "list"     // stdout: JSON rows, the first page of open tasks; no argument
+	VerbCreate   = "create"   // stdin: the task as markdown; flags: its properties; stdout: the new id
 )
 
-// Verbs lists every verb, in the contract's order.
-var Verbs = []string{VerbRead, VerbURL, VerbSearch, VerbBranch, VerbChildren, VerbIndex, VerbList}
+// Verbs lists every verb, in the contract's order: the read verbs, then the
+// write verbs.
+var Verbs = []string{VerbRead, VerbURL, VerbSearch, VerbBranch, VerbChildren, VerbIndex, VerbList, VerbCreate}
 
 // Priorities is the contract's priority vocabulary, most urgent first.
 var Priorities = []string{"urgent", "high", "medium", "low"}
@@ -78,15 +82,53 @@ type Tracker interface {
 	List(ctx context.Context) ([]Row, error)
 }
 
-// Serve answers one verb from t on w. A verb outside the contract returns
-// ErrUnsupported, so a verb added to f10 later declines correctly.
-func Serve(ctx context.Context, t Tracker, verb, arg string, w io.Writer) error {
+// NewTask is a task for create: the title and body from stdin, the
+// properties from flags, each empty when the caller did not set it.
+type NewTask struct {
+	Title    string
+	Body     string
+	Status   string   // the tracker's own word, as given
+	Priority string   // one of Priorities
+	Labels   []string // in the order given
+	Parent   string   // a task number
+	After    string   // a task number
+	Dropped  []string // flags create does not know, which the tracker warns about and drops
+}
+
+// Creator is a Tracker that implements create. A tracker without it
+// declines the verb.
+type Creator interface {
+	Create(ctx context.Context, task NewTask) (string, error)
+}
+
+// Serve answers one verb from t on w. args are the verb's arguments; the
+// read verbs take the first, create parses them as flags and reads the task
+// from stdin. A verb outside the contract returns ErrUnsupported, so a verb
+// added to f10 later declines correctly.
+func Serve(ctx context.Context, t Tracker, verb string, args []string, stdin io.Reader, w io.Writer) error {
+	arg := ""
+	if len(args) > 0 {
+		arg = args[0]
+	}
+
 	needsNumber := verb == VerbRead || verb == VerbURL || verb == VerbBranch || verb == VerbChildren
 	if needsNumber && !isNumber(arg) {
 		return fmt.Errorf("%s needs a task number, got %q", verb, arg)
 	}
 
 	switch verb {
+	case VerbCreate:
+		c, ok := t.(Creator)
+		if !ok {
+			return ErrUnsupported
+		}
+
+		task, err := parseCreate(args, stdin)
+		if err != nil {
+			return err
+		}
+
+		return line(w)(c.Create(ctx, task))
 	case VerbRead:
 		md, err := t.Read(ctx, arg)
 		if err != nil {
@@ -111,6 +153,126 @@ func Serve(ctx context.Context, t Tracker, verb, arg string, w io.Writer) error 
 	default:
 		return ErrUnsupported
 	}
+}
+
+// parseCreate reads create's flags and the task on stdin.
+func parseCreate(args []string, stdin io.Reader) (NewTask, error) {
+	var (
+		task   NewTask
+		labels labelFlag
+	)
+
+	fs := flag.NewFlagSet(VerbCreate, flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&task.Status, "status", "", "")
+	fs.StringVar(&task.Priority, "priority", "", "")
+	fs.Var(&labels, "label", "")
+	fs.StringVar(&task.Parent, "parent", "", "")
+	fs.StringVar(&task.After, "after", "", "")
+
+	// A property f10 adds to create later degrades to a warning instead of
+	// failing every driver built before it.
+	args, task.Dropped = dropUnknown(fs, args)
+
+	if err := fs.Parse(args); err != nil {
+		return task, fmt.Errorf("create: %w", err)
+	}
+
+	if fs.NArg() > 0 {
+		return task, fmt.Errorf("create takes no arguments, only flags; got %q", fs.Arg(0))
+	}
+
+	task.Labels = labels
+
+	if task.Priority != "" && !IsPriority(task.Priority) {
+		return task, fmt.Errorf("create: --priority %q is not one of %s", task.Priority, strings.Join(Priorities, ", "))
+	}
+
+	for name, v := range map[string]string{"parent": task.Parent, "after": task.After} {
+		if v != "" && !isNumber(v) {
+			return task, fmt.Errorf("create: --%s needs a task number, got %q", name, v)
+		}
+	}
+
+	data, err := io.ReadAll(stdin)
+	if err != nil {
+		return task, fmt.Errorf("create: reading stdin: %w", err)
+	}
+
+	task.Title, task.Body, err = parseTask(string(data))
+
+	return task, err
+}
+
+// dropUnknown removes the flags fs does not define, with their values, and
+// returns the rest and the dropped flag names.
+func dropUnknown(fs *flag.FlagSet, args []string) ([]string, []string) {
+	var kept, dropped []string
+
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" || !strings.HasPrefix(a, "-") {
+			return append(kept, args[i:]...), dropped
+		}
+
+		name, _, hasValue := strings.Cut(strings.TrimLeft(a, "-"), "=")
+		known := fs.Lookup(name) != nil
+
+		if known {
+			kept = append(kept, a)
+		} else {
+			dropped = append(dropped, name)
+		}
+
+		// Every create flag takes a value; an unknown one takes the next
+		// argument only when it does not look like a flag.
+		if !hasValue && i+1 < len(args) && (known || !strings.HasPrefix(args[i+1], "-")) {
+			i++
+
+			if known {
+				kept = append(kept, args[i])
+			}
+		}
+	}
+
+	return kept, dropped
+}
+
+// parseTask splits create's stdin into the `# <title>` line and the body
+// after it.
+func parseTask(md string) (string, string, error) {
+	first, rest, _ := strings.Cut(strings.TrimLeft(md, " \t\r\n"), "\n")
+	first = strings.TrimRight(first, "\r")
+
+	title := strings.TrimSpace(strings.TrimPrefix(first, "# "))
+	if !strings.HasPrefix(first, "# ") || title == "" {
+		return "", "", fmt.Errorf(
+			"create wants the task on stdin as `# <title>` then the body; the first line is %q", first)
+	}
+
+	// Only whole blank lines go: a body opening with an indented code block
+	// keeps its indent.
+	for {
+		line, after, found := strings.Cut(rest, "\n")
+		if !found || strings.TrimSpace(line) != "" {
+			break
+		}
+
+		rest = after
+	}
+
+	return title, strings.TrimRight(rest, " \t\r\n"), nil
+}
+
+// labelFlag collects a repeated --label.
+type labelFlag []string
+
+func (l *labelFlag) String() string { return strings.Join(*l, ",") }
+
+func (l *labelFlag) Set(v string) error {
+	*l = append(*l, v)
+
+	return nil
 }
 
 func line(w io.Writer) func(string, error) error {

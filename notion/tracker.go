@@ -40,7 +40,10 @@ type Tracker struct {
 	ids   map[string]string // page id to task id, for after relations
 }
 
-var _ contract.Tracker = (*Tracker)(nil)
+var (
+	_ contract.Tracker = (*Tracker)(nil)
+	_ contract.Creator = (*Tracker)(nil)
+)
 
 // New returns the tracker for cfg. baseURL overrides the API root (tests,
 // proxies); warn receives non-fatal notices such as a truncated body.
@@ -110,7 +113,8 @@ func (t *Tracker) Read(ctx context.Context, number string) (string, error) {
 		}
 	}
 
-	if body := strings.TrimSpace(md.Markdown); body != "" {
+	body := strings.TrimSpace(md.Markdown)
+	if body != "" {
 		b.WriteString("\n" + body + "\n")
 	}
 
@@ -118,7 +122,8 @@ func (t *Tracker) Read(ctx context.Context, number string) (string, error) {
 		fmt.Fprintf(&b, "\n> Notion's markdown export left part of this page out; the full page: %s\n", p.URL)
 	}
 
-	if row.After != "" {
+	// A task created from f10 keeps its After: line in the body; print it once.
+	if row.After != "" && !endsWithLine(body, "After: "+row.After) {
 		fmt.Fprintf(&b, "\nAfter: %s\n", row.After)
 	}
 
@@ -252,6 +257,155 @@ func (t *Tracker) Children(ctx context.Context, number string) ([]contract.Child
 	}
 
 	return children, nil
+}
+
+// Create makes a page for the task and returns its id. Every property value
+// is checked against the schema before the page is created: Notion rejects
+// an unknown status, and would add an unknown label to the schema.
+func (t *Tracker) Create(ctx context.Context, task contract.NewTask) (string, error) {
+	ds, err := t.dataSource(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	for _, name := range task.Dropped {
+		_, _ = fmt.Fprintf(t.warn, "warn: --%s dropped: create does not know it\n", name)
+	}
+
+	props := map[string]any{
+		t.props.Title: map[string]any{"title": []any{map[string]any{"text": map[string]any{"content": task.Title}}}},
+	}
+
+	for _, f := range []struct{ flag, value, prop string }{
+		{"status", task.Status, t.props.Status},
+		{"priority", task.Priority, t.props.Priority},
+	} {
+		if f.value == "" || !t.configured(f.flag, f.prop) {
+			continue
+		}
+
+		name, err := t.optionFor(f.flag, f.value)
+		if err != nil {
+			return "", err
+		}
+
+		props[f.prop] = map[string]any{ds.Properties[f.prop].Type: map[string]any{"name": name}}
+	}
+
+	if len(task.Labels) > 0 && t.configured("label", t.props.Labels) {
+		v, err := t.labelsValue(task.Labels)
+		if err != nil {
+			return "", err
+		}
+
+		props[t.props.Labels] = v
+	}
+
+	for _, f := range []struct{ flag, number, prop string }{
+		{"parent", task.Parent, t.props.Parent},
+		{"after", task.After, t.props.After},
+	} {
+		if f.number == "" || !t.configured(f.flag, f.prop) {
+			continue
+		}
+
+		p, err := t.find(ctx, f.number)
+		if err != nil {
+			return "", fmt.Errorf("--%s: %w", f.flag, err)
+		}
+
+		props[f.prop] = map[string]any{"relation": []any{map[string]any{"id": p.ID}}}
+	}
+
+	page, err := t.client.CreatePage(ctx, NewPage{
+		Parent:     PageParent{Type: "data_source_id", DataSourceID: ds.ID},
+		Properties: props,
+		Markdown:   task.Body,
+	})
+
+	if _, ok := errors.AsType[*UnknownOutcomeError](err); ok {
+		return "", fmt.Errorf(
+			"%w; the task may have been created: check https://www.notion.so/%s before running create again",
+			err, normalize(ds.Parent.DatabaseID))
+	}
+
+	if err != nil {
+		return "", err
+	}
+
+	id := t.taskID(page)
+	if id == "" {
+		return "", fmt.Errorf("created %s, but Notion gave it no %q number", page.URL, t.props.ID)
+	}
+
+	t.remember([]Page{*page})
+
+	return id, nil
+}
+
+// configured reports whether a create flag has a property to go to, and
+// warns that the flag is dropped when it has none.
+func (t *Tracker) configured(flag, prop string) bool {
+	if prop == "" {
+		_, _ = fmt.Fprintf(t.warn, "warn: --%s dropped: notion.properties sets no property for it\n", flag)
+	}
+
+	return prop != ""
+}
+
+// optionFor maps a status or a contract priority level to an option of its
+// property, by its exact name. A level maps to the first value
+// notion.priority lists for it that is an option, else an option named
+// like the level.
+func (t *Tracker) optionFor(flag, value string) (string, error) {
+	prop, candidates := t.props.Status, []string{value}
+	if flag == "priority" {
+		prop, candidates = t.props.Priority, append(slices.Clone(t.n.Priority[value]), value)
+	}
+
+	names := options(t.ds.Properties[prop])
+	for _, c := range candidates {
+		if j := indexFold(names, c); j >= 0 {
+			return names[j], nil
+		}
+	}
+
+	return "", fmt.Errorf("--%s %q: no option of %q matches (%s)", flag, value, prop, strings.Join(names, ", "))
+}
+
+// labelsValue checks each label is an option of the labels property and
+// builds its value; a select property holds one label.
+func (t *Tracker) labelsValue(labels []string) (any, error) {
+	prop := t.props.Labels
+	names := options(t.ds.Properties[prop])
+	exact := make([]any, 0, len(labels))
+
+	for _, l := range labels {
+		j := indexFold(names, l)
+		if j < 0 {
+			return nil, fmt.Errorf("--label %q is not an option of %q (%s)", l, prop, strings.Join(names, ", "))
+		}
+
+		exact = append(exact, map[string]any{"name": names[j]})
+	}
+
+	if t.ds.Properties[prop].Type == "select" {
+		if len(exact) > 1 {
+			return nil, fmt.Errorf("--label: %q is a select property and holds one label, got %d", prop, len(exact))
+		}
+
+		return map[string]any{"select": exact[0]}, nil
+	}
+
+	return map[string]any{"multi_select": exact}, nil
+}
+
+// endsWithLine reports whether text's last line is line, ignoring
+// surrounding whitespace.
+func endsWithLine(text, line string) bool {
+	text = strings.TrimRight(text, " \t\r\n")
+
+	return strings.TrimSpace(text[strings.LastIndex(text, "\n")+1:]) == line
 }
 
 func (t *Tracker) rows(ctx context.Context, q Query) ([]contract.Row, error) {
@@ -437,18 +591,10 @@ func (t *Tracker) checkPrefix(s PropertySchema) error {
 // exactDone rewrites each done status to the option's exact name, so the
 // list filter, which Notion matches exactly, agrees with IsDone.
 func (t *Tracker) exactDone(name string, s PropertySchema) error {
-	options := s.Status.Options
-	if s.Type == "select" {
-		options = s.Select.Options
-	}
-
-	names := make([]string, len(options))
-	for i, o := range options {
-		names[i] = o.Name
-	}
+	names := options(s)
 
 	for i, d := range t.n.Done {
-		j := slices.IndexFunc(names, func(n string) bool { return strings.EqualFold(n, d) })
+		j := indexFold(names, d)
 		if j < 0 {
 			return fmt.Errorf("notion.done: %q is not an option of %q (%s)", d, name, strings.Join(names, ", "))
 		}
@@ -457,6 +603,33 @@ func (t *Tracker) exactDone(name string, s PropertySchema) error {
 	}
 
 	return nil
+}
+
+// options lists the option names of a status, select or multi-select
+// property.
+func options(s PropertySchema) []string {
+	var opts []Option
+
+	switch s.Type {
+	case "status":
+		opts = s.Status.Options
+	case "select":
+		opts = s.Select.Options
+	case "multi_select":
+		opts = s.MultiSelect.Options
+	}
+
+	names := make([]string, len(opts))
+	for i, o := range opts {
+		names[i] = o.Name
+	}
+
+	return names
+}
+
+// indexFold finds v among names, case-insensitively, or returns -1.
+func indexFold(names []string, v string) int {
+	return slices.IndexFunc(names, func(n string) bool { return strings.EqualFold(n, v) })
 }
 
 // propFilter builds a filter on a status or select property, whichever the

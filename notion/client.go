@@ -27,13 +27,19 @@ const (
 	maxRetryWait = 10 * time.Second
 	maxRetries   = 3
 	pageSize     = 100
+
+	readTimeout = 30 * time.Second
+	// writeTimeout is longer than a read's: a write that times out leaves its
+	// outcome unknown, and a re-run can make the task twice.
+	writeTimeout = 60 * time.Second
 )
 
 // Client calls the endpoints the tracker needs and no others.
 type Client struct {
 	base  string
 	token string
-	http  *http.Client
+	read  *http.Client
+	write *http.Client
 }
 
 // NewClient returns a client for base (DefaultBaseURL when empty).
@@ -42,7 +48,12 @@ func NewClient(base, token string) *Client {
 		base = DefaultBaseURL
 	}
 
-	return &Client{base: strings.TrimRight(base, "/"), token: token, http: &http.Client{Timeout: 30 * time.Second}}
+	return &Client{
+		base:  strings.TrimRight(base, "/"),
+		token: token,
+		read:  &http.Client{Timeout: readTimeout},
+		write: &http.Client{Timeout: writeTimeout},
+	}
 }
 
 // APIError is an error response, printed as Notion words it.
@@ -59,6 +70,16 @@ func (e *APIError) Error() string {
 
 	return fmt.Sprintf("notion: %s: %s", e.Code, e.Message)
 }
+
+// UnknownOutcomeError is a write that may have reached Notion with no answer
+// saying whether it acted: the connection failed, or Notion answered 5xx.
+type UnknownOutcomeError struct {
+	Err error
+}
+
+func (e *UnknownOutcomeError) Error() string { return e.Err.Error() }
+
+func (e *UnknownOutcomeError) Unwrap() error { return e.Err }
 
 // Database is a database object, trimmed to what the tracker reads.
 type Database struct {
@@ -90,6 +111,9 @@ type PropertySchema struct {
 	Select struct {
 		Options []Option `json:"options"`
 	} `json:"select"`
+	MultiSelect struct {
+		Options []Option `json:"options"`
+	} `json:"multi_select"`
 }
 
 // Page is a page object with its property values.
@@ -155,6 +179,20 @@ type Query struct {
 	StartCursor string `json:"start_cursor,omitempty"`
 }
 
+// NewPage is a create-page body: a page in a data source, with its
+// properties in Notion's request shapes and its body as markdown.
+type NewPage struct {
+	Parent     PageParent     `json:"parent"`
+	Properties map[string]any `json:"properties"`
+	Markdown   string         `json:"markdown,omitempty"`
+}
+
+// PageParent is the data source a new page goes into.
+type PageParent struct {
+	Type         string `json:"type"` // "data_source_id"
+	DataSourceID string `json:"data_source_id"`
+}
+
 type list[T any] struct {
 	Results    []T     `json:"results"`
 	HasMore    bool    `json:"has_more"`
@@ -206,6 +244,15 @@ func (c *Client) Page(ctx context.Context, id string) (*Page, error) {
 	return &p, c.do(ctx, http.MethodGet, "/pages/"+id, nil, nil, &p)
 }
 
+// CreatePage creates a page. It is the client's one write: only a 429 is
+// retried, and a failure that leaves the outcome open is an
+// *UnknownOutcomeError.
+func (c *Client) CreatePage(ctx context.Context, p NewPage) (*Page, error) {
+	var created Page
+
+	return &created, c.send(ctx, true, http.MethodPost, "/pages", nil, p, &created)
+}
+
 // PageMarkdown retrieves a page's body as markdown.
 func (c *Client) PageMarkdown(ctx context.Context, id string) (*Markdown, error) {
 	var md Markdown
@@ -234,9 +281,16 @@ func (c *Client) Comments(ctx context.Context, pageID string) ([]Comment, error)
 	}
 }
 
-// do sends one request, retrying a 429 or a transient 5xx a few times after
-// Retry-After. Every call it makes is a read, so a retry is safe.
+// do sends a read, retrying a 429 or a transient 5xx a few times after
+// Retry-After: a read changes nothing, so a retry is safe.
 func (c *Client) do(ctx context.Context, method, path string, query url.Values, body, out any) error {
+	return c.send(ctx, false, method, path, query, body, out)
+}
+
+// send sends one request. A write retries only a 429, which Notion answers
+// before acting; a lost connection or a 5xx on a write is an
+// *UnknownOutcomeError, and a 2xx is a write that happened, readable or not.
+func (c *Client) send(ctx context.Context, write bool, method, path string, query url.Values, body, out any) error {
 	var payload []byte
 
 	if body != nil {
@@ -251,7 +305,16 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 		u += "?" + query.Encode()
 	}
 
+	hc := c.read
+	if write {
+		hc = c.write
+	}
+
 	for attempt := 0; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err // nothing was sent
+		}
+
 		req, err := http.NewRequestWithContext(ctx, method, u, bytes.NewReader(payload))
 		if err != nil {
 			return err
@@ -264,19 +327,19 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 			req.Header.Set("Content-Type", "application/json")
 		}
 
-		resp, err := c.http.Do(req)
+		resp, err := hc.Do(req)
 		if err != nil {
+			if write {
+				return &UnknownOutcomeError{Err: fmt.Errorf("notion: %w", err)}
+			}
+
 			return fmt.Errorf("notion: %w", err)
 		}
 
-		data, err := io.ReadAll(resp.Body)
+		data, readErr := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
 
-		if err != nil {
-			return fmt.Errorf("notion: %w", err)
-		}
-
-		if retryable(resp.StatusCode) && attempt < maxRetries {
+		if retryable(write, resp.StatusCode) && attempt < maxRetries {
 			if err := sleep(ctx, retryAfter(resp.Header.Get("Retry-After"))); err != nil {
 				return err
 			}
@@ -288,18 +351,36 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 			apiErr := &APIError{Status: resp.StatusCode}
 			_ = json.Unmarshal(data, apiErr)
 
+			if write && resp.StatusCode/100 == 5 {
+				return &UnknownOutcomeError{Err: apiErr}
+			}
+
 			return apiErr
 		}
 
-		if err := json.Unmarshal(data, out); err != nil {
-			return fmt.Errorf("notion: decoding %s: %w", path, err)
+		if readErr == nil {
+			if err := json.Unmarshal(data, out); err != nil {
+				readErr = fmt.Errorf("decoding %s: %w", path, err)
+			}
+		}
+
+		if readErr != nil && write {
+			return fmt.Errorf("notion: %s %s succeeded, but its answer could not be read: %w", method, path, readErr)
+		}
+
+		if readErr != nil {
+			return fmt.Errorf("notion: %w", readErr)
 		}
 
 		return nil
 	}
 }
 
-func retryable(status int) bool {
+func retryable(write bool, status int) bool {
+	if write {
+		return status == http.StatusTooManyRequests
+	}
+
 	switch status {
 	case http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway,
 		http.StatusServiceUnavailable, http.StatusGatewayTimeout:

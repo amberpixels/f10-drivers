@@ -14,14 +14,14 @@ Tracker drivers for [f10](https://github.com/amberpixels/f10), configured per pr
 
 f10 reaches GitHub and GitLab issues through `gh` and `glab`.
 Any other tracker goes through an executable at `.f10/driver` that answers f10's [driver contract](https://github.com/amberpixels/f10/blob/main/docs/driver-contract.md).
-The contract is seven verbs, data on stdout, and exit 3 for a verb the driver does not implement.
+The contract is seven read verbs and one write verb, `create`, with answers on stdout and exit 3 for a verb the driver does not implement.
 
 `f10-drivers` implements that contract once per tracker.
 A project carries a one-line shim and a small TOML file, and no code.
 
 | tracker | verbs |
 |---|---|
-| Notion | `read`, `url`, `search`, `list`, `index`, `branch`, `children` |
+| Notion | `read`, `url`, `search`, `list`, `index`, `branch`, `children`, `create` |
 
 ## Install
 
@@ -54,9 +54,8 @@ tracker:
   id: MKT-###
 ```
 
-Creating tasks is not a driver verb.
-It stays with the **Create** adapter under `## Tracker` in `project.md`.
-The Notion MCP connector suits it, since Notion takes blocks, not a markdown string.
+`f10 task create` and the capture step create tasks through the driver's `create`.
+The **Create** adapter under `## Tracker` in `project.md` is only needed for a driver that declines it.
 
 ## Notion
 
@@ -116,6 +115,18 @@ The driver fails with a message naming the problem on:
 | `index` | the database's url |
 | `branch <n>` | the `branch` template filled from the task |
 | `children <n>` | tasks whose `parent` relation holds this one; `state` is `closed` for a `done` status |
+| `create` | the new task's id (`MKT-57`), after making a page from the markdown on stdin and the flags below |
+
+`create` reads `# <title>` then the body on stdin and sends the body to Notion as markdown, in one request.
+Its flags map through `[notion.properties]`:
+
+- `--status` and `--label` must be options of their property, matched case-insensitively. A select labels property takes one label.
+- `--priority <level>` takes the first value `[notion.priority]` lists for the level that is an option, else the option named like the level.
+- `--parent <n>` and `--after <n>` must be existing tasks. The body keeps its closing `After:` line, and `read` prints that line once.
+- A flag whose property is not configured, or that `create` does not know, is dropped with a warning.
+
+A value the schema does not allow fails before the page is created, naming the property and its options.
+`create` retries only a 429. A 5xx or a lost connection is not retried, and the error says the task may have been created and names the database to check.
 
 Images stay links, signed urls included: f10 downloads them itself.
 A body Notion cuts short, or blocks it cannot render, gets a line in the answer pointing at the full page, and a warning on stderr.
@@ -124,6 +135,7 @@ A body Notion cuts short, or blocks it cannot render, gets a line in the answer 
 ## Conformance
 
 `conformance.Check` runs every verb through a driver's process boundary and checks each answer against the contract.
+That includes `create`, followed by a `read` of the new task, so point it at a fake or a scratch database; a driver that declines `create` passes.
 It wants one line for a url or a branch, a JSON array of rows with the required fields, priorities in the vocabulary and RFC 3339 times.
 A declined verb must exit 3; a missing task must exit non-zero with stderr.
 The Notion driver runs it against a fake Notion API (`notion/notiontest`) through the same shim a project uses.

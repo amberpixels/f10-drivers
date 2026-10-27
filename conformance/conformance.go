@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/url"
 	"os/exec"
 	"regexp"
@@ -25,17 +26,18 @@ type Result struct {
 	Code           int
 }
 
-// Runner runs the driver with a verb and an optional argument.
-type Runner func(t *testing.T, args ...string) Result
+// Runner runs the driver with stdin, a verb and its arguments.
+type Runner func(t *testing.T, stdin string, args ...string) Result
 
 // Command runs an executable from dir, as f10 runs .f10/driver from the
 // checkout root, with env added to the test's environment.
 func Command(path, dir string, env ...string) Runner {
-	return func(t *testing.T, args ...string) Result {
+	return func(t *testing.T, stdin string, args ...string) Result {
 		t.Helper()
 
 		cmd := exec.CommandContext(t.Context(), path, args...)
 		cmd.Dir = dir
+		cmd.Stdin = strings.NewReader(stdin)
 		cmd.Env = append(cmd.Environ(), env...)
 
 		var stdout, stderr bytes.Buffer
@@ -60,11 +62,19 @@ type Fixture struct {
 	Missing  string   // a number no task has
 	Query    string   // a search query matching at least one task
 	Declined []string // verbs this configuration declines with exit 3
+	// Implements lists verbs that must answer, for those a driver may also
+	// decline: create, which passes with exit 3 unless listed here.
+	Implements []string
 }
 
-var idShape = regexp.MustCompile(`^[A-Z][A-Z0-9]*-\d+$`)
+var (
+	idShape = regexp.MustCompile(`^[A-Z][A-Z0-9]*-\d+$`)
+	numeral = regexp.MustCompile(`^\d+$`)
+)
 
 // Check runs every verb of the contract and checks each answer's shape.
+// Unless the fixture declines it, that includes create, which makes a task
+// in whatever tracker run reaches: point it at a fake or a scratch database.
 func Check(t *testing.T, run Runner, fx Fixture) {
 	t.Helper()
 
@@ -79,7 +89,7 @@ func Check(t *testing.T, run Runner, fx Fixture) {
 				if fx.Parent != "" {
 					arg = fx.Parent
 				}
-			case contract.VerbIndex, contract.VerbList:
+			case contract.VerbIndex, contract.VerbList, contract.VerbCreate:
 				arg = ""
 			}
 
@@ -88,9 +98,17 @@ func Check(t *testing.T, run Runner, fx Fixture) {
 				args = append(args, arg)
 			}
 
-			res := run(t, args...)
+			stdin := ""
+			if verb == contract.VerbCreate {
+				stdin = newTask
+			}
 
-			if slices.Contains(fx.Declined, verb) {
+			res := run(t, stdin, args...)
+
+			// A declined create always has a fallback, so it passes unlisted.
+			declined := verb == contract.VerbCreate && res.Code == contract.ExitUnsupported &&
+				!slices.Contains(fx.Implements, verb)
+			if slices.Contains(fx.Declined, verb) || declined {
 				if res.Code != contract.ExitUnsupported || res.Stdout != "" {
 					t.Fatalf("%s: want exit %d and no stdout for a declined verb, got exit %d, stdout %q",
 						verb, contract.ExitUnsupported, res.Code, res.Stdout)
@@ -114,22 +132,54 @@ func Check(t *testing.T, run Runner, fx Fixture) {
 				checkRows(t, res.Stdout, verb == contract.VerbSearch)
 			case contract.VerbChildren:
 				checkChildren(t, res.Stdout)
+			case contract.VerbCreate:
+				checkCreated(t, run, oneLine(t, res.Stdout))
 			}
 		})
 	}
 
 	t.Run("unknown verb declines", func(t *testing.T) {
-		if res := run(t, "frobnicate"); res.Code != contract.ExitUnsupported {
+		if res := run(t, "", "frobnicate"); res.Code != contract.ExitUnsupported {
 			t.Fatalf("want exit %d for a verb outside the contract, got %d", contract.ExitUnsupported, res.Code)
 		}
 	})
 
 	t.Run("missing task fails", func(t *testing.T) {
-		res := run(t, contract.VerbRead, fx.Missing)
+		res := run(t, "", contract.VerbRead, fx.Missing)
 		if res.Code == 0 || res.Code == contract.ExitUnsupported || strings.TrimSpace(res.Stderr) == "" {
 			t.Fatalf("want a failure with stderr for a missing task, got exit %d, stderr %q", res.Code, res.Stderr)
 		}
 	})
+}
+
+// The task Check creates; checkCreated reads its title and body back.
+var (
+	newTitle = fmt.Sprintf("Conformance check %d", time.Now().UnixNano())
+	newBody  = "Created by conformance.Check.\n\n- one\n- two"
+	newTask  = "# " + newTitle + "\n\n" + newBody + "\n"
+)
+
+// checkCreated checks create printed a task id and read finds that task
+// with the title and body it was created with.
+func checkCreated(t *testing.T, run Runner, id string) {
+	t.Helper()
+
+	if !idShape.MatchString(id) && !numeral.MatchString(id) {
+		t.Fatalf("create printed %q, want a task id or number", id)
+	}
+
+	number := id[strings.LastIndex(id, "-")+1:]
+
+	res := run(t, "", contract.VerbRead, number)
+	if res.Code != 0 {
+		t.Fatalf("read %s after create: exit %d, stderr: %s", number, res.Code, res.Stderr)
+	}
+
+	for _, want := range []string{newTitle, newBody} {
+		if !strings.Contains(res.Stdout, want) {
+			t.Errorf("read %s lacks %q:\n%s", number, want, res.Stdout)
+		}
+	}
 }
 
 func oneLine(t *testing.T, out string) string {
