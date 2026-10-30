@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -92,6 +93,10 @@ func TestServeCreate(t *testing.T) {
 		"2",
 		"--after",
 		"3",
+		"--set",
+		"result=https://x.test/r?a=b",
+		"--set",
+		"due=",
 	}
 
 	err := contract.Serve(
@@ -109,10 +114,12 @@ func TestServeCreate(t *testing.T) {
 	want := contract.NewTask{
 		Title: "A title", Body: "The body.\n\nAfter: MKT-3", Status: "In progress", Priority: "high",
 		Labels: []string{"a", "b"}, Parent: "2", After: "3",
+		Set: []contract.KeyValue{{Key: "result", Value: "https://x.test/r?a=b"}, {Key: "due", Value: ""}},
 	}
 	if c.got.Title != want.Title || c.got.Body != want.Body || c.got.Status != want.Status ||
 		c.got.Priority != want.Priority || strings.Join(c.got.Labels, ",") != "a,b" ||
-		c.got.Parent != want.Parent || c.got.After != want.After {
+		c.got.Parent != want.Parent || c.got.After != want.After ||
+		!slices.Equal(c.got.Set, want.Set) {
 		t.Fatalf("task = %+v, want %+v", c.got, want)
 	}
 }
@@ -156,6 +163,8 @@ func TestServeCreateRejects(t *testing.T) {
 		{"bad priority", "# T", `--priority "p1" is not one of`, []string{"--priority", "p1"}},
 		{"parent id", "# T", `--parent needs a task number, got "MKT-2"`, []string{"--parent", "MKT-2"}},
 		{"positional", "# T", "takes no arguments", []string{"2"}},
+		{"set without =", "# T", `want key=value, got "due"`, []string{"--set", "due"}},
+		{"set twice", "# T", "due is set twice", []string{"--set", "due=a", "--set", "due=b"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := &creator{}

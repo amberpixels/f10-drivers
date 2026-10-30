@@ -35,6 +35,9 @@ labels = "Tags"
 result = "Result"
 due = "Due"
 feature = "Feature"
+kind = "Kind"
+points = "Points"
+reviewed = "Reviewed"
 %s
 
 [notion.priority]
@@ -410,6 +413,68 @@ func TestNotionCreateFailsBeforeWriting(t *testing.T) {
 			if srv.Creates() != 0 {
 				t.Fatalf("POST /pages sent %d times, want none", srv.Creates())
 			}
+		})
+	}
+}
+
+// TestNotionCreateSet writes the --set values in the create request and
+// leaves an empty one out.
+func TestNotionCreateSet(t *testing.T) {
+	transports(t, func(t *testing.T, srv *notiontest.Server, run conformance.Runner) {
+		res := run(t, "# T", "create", "--set", "result=https://example.com/r", "--set", "due=2026-11-02",
+			"--set", "kind=bug", "--set", "points=3", "--set", "reviewed=true")
+		if res.Code != 0 || res.Stdout != "MKT-6\n" || res.Stderr != "" {
+			t.Fatalf("exit %d, stdout %q, stderr %q", res.Code, res.Stdout, res.Stderr)
+		}
+
+		res = run(t, "", "read", "6")
+		for _, want := range []string{
+			"Result: https://example.com/r\n", "Due: 2026-11-02\n", "Kind: Bug\n", "Points: 3\n", "Reviewed: Yes\n",
+		} {
+			if !strings.Contains(res.Stdout, want) {
+				t.Errorf("read lacks %q:\n%s", want, res.Stdout)
+			}
+		}
+
+		if res = run(t, "# U", "create", "--set", "due="); res.Code != 0 || res.Stdout != "MKT-7\n" {
+			t.Fatalf("empty --set: exit %d, stdout %q, stderr %q", res.Code, res.Stdout, res.Stderr)
+		}
+
+		if res = run(t, "", "read", "7"); strings.Contains(res.Stdout, "Due:") {
+			t.Errorf("want no Due on MKT-7:\n%s", res.Stdout)
+		}
+
+		if srv.Creates() != 2 || srv.Updates() != 0 {
+			t.Errorf("%d create(s) and %d update(s) sent, want 2 and none", srv.Creates(), srv.Updates())
+		}
+	})
+}
+
+func TestNotionCreateSetRejectsBeforeSending(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"unknown key", []string{"--set", "owner=x"}, "--set owner: not a key of [notion.properties] (due, feature, kind, points, result, reviewed)"},
+		{"fixed key", []string{"--set", "status=Done"}, "--set status: use --status"},
+		{"assignee", []string{"--set", "assignee=ann"}, "--set assignee: create takes no assignee; set it with update"},
+		{"bad option", []string{"--set", "kind=chore"}, `no option of "Kind" matches (Feature, Bug)`},
+		{"bad url", []string{"--set", "result=example.com"}, `"Result" is a url property, want an absolute http(s) url`},
+		{"bad date", []string{"--set", "due=next week"}, `"Due" is a date property, want a date`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			transports(t, func(t *testing.T, srv *notiontest.Server, run conformance.Runner) {
+				res := run(t, "# T", append([]string{"create"}, tc.args...)...)
+				if res.Code != contract.ExitNotWritten || !strings.Contains(res.Stderr, tc.want) {
+					t.Fatalf("want exit %d naming %q, got exit %d, stderr %q",
+						contract.ExitNotWritten, tc.want, res.Code, res.Stderr)
+				}
+
+				if srv.Creates() != 0 {
+					t.Fatalf("%d create(s) sent, want none", srv.Creates())
+				}
+			})
 		})
 	}
 }
@@ -844,7 +909,7 @@ func TestNotionUpdateRejectsBeforeSending(t *testing.T) {
 		{"positional", []string{"--status", "Done", "extra"}, `got "extra"`},
 		{"status", []string{"--status", "Blocked"}, `--status "Blocked": no option of "Status" matches`},
 		{"label", []string{"--label", "ads"}, `--label "ads" is not an option of "Tags"`},
-		{"unknown key", []string{"--set", "owner=x"}, "--set owner: not a key of [notion.properties] (due, feature, result)"},
+		{"unknown key", []string{"--set", "owner=x"}, "--set owner: not a key of [notion.properties] (due, feature, kind, points, result, reviewed)"},
 		{"fixed key", []string{"--set", "labels=x"}, "--set labels: use --label"},
 		{"no equals", []string{"--set", "result"}, `want key=value, got "result"`},
 		{"bad url", []string{"--set", "result=example.com"}, `"Result" is a url property, want an absolute http(s) url`},

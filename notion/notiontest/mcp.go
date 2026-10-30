@@ -896,8 +896,8 @@ func (s *Server) dateOf(p page, name string) map[string]any {
 	return out
 }
 
-// sqliteToRequest turns an update's SQLite value into the REST request
-// shape respond checks.
+// sqliteToRequest turns a create's or an update's SQLite value into the
+// REST request shape respond checks.
 func sqliteToRequest(typ string, v any) (any, error) {
 	if v == nil {
 		return nil, nil
@@ -1048,6 +1048,26 @@ func (s *Server) createPages(args map[string]any) (any, error) {
 	set := map[string]any{}
 
 	for key, v := range props {
+		if strings.HasPrefix(key, "date:") {
+			parts := strings.Split(key, ":")
+			if len(parts) != 3 || types[parts[1]] != "date" {
+				return nil, notionErrorf("Property %q does not exist", key)
+			}
+
+			d, _ := set[parts[1]].(map[string]any)
+			if d == nil {
+				d = map[string]any{"start": nil, "end": nil, "time_zone": nil}
+			}
+
+			if parts[2] == "start" || parts[2] == "end" {
+				d[parts[2]] = v
+			}
+
+			set[parts[1]] = d
+
+			continue
+		}
+
 		name := strings.TrimPrefix(key, "userDefined:")
 		if valueKey(name) != key {
 			return nil, notionErrorf("Property %q must be written %q", key, valueKey(name))
@@ -1087,7 +1107,12 @@ func (s *Server) createPages(args map[string]any) (any, error) {
 
 			req = out
 		default:
-			return nil, fmt.Errorf("the fake cannot set a %s property", typ)
+			r, err := sqliteToRequest(typ, v)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", name, err)
+			}
+
+			req = r
 		}
 
 		resp, err := s.respond(typ, req, options(schema, name, typ))

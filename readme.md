@@ -93,7 +93,7 @@ assignee = "Assignee"             # people
 labels = "Tags"                   # multi_select or select
 parent = "Parent task"            # relation; without it, children declines
 after = "Blocked by"              # relation; the task this one waits for
-result = "Result"                 # any other key: a property update --set <key>=<value> writes
+result = "Result"                 # any other key: a property --set <key>=<value> writes
 
 [notion.priority]                 # extra option names per level
 high = ["High", "P1"]
@@ -117,8 +117,8 @@ The driver checks the config against the database: unknown keys, missing or mist
 | `comment <n>` | the new comment's id, from markdown on stdin, posted as a page comment |
 | `update <n>` | the task's id, after setting the properties its flags name |
 
-`create` takes `--status`, `--label`, `--priority <level>`, `--parent <n>` and `--after <n>`, mapped through `[notion.properties]`.
-Values are checked against the schema before the page is made; unknown or unconfigured flags are dropped with a warning.
+`create` takes `--status`, `--label`, `--priority <level>`, `--parent <n>` and `--after <n>`, mapped through `[notion.properties]`, and `--set <key>=<value>` with the keys and value types `update` takes.
+Values are checked against the schema before the page is made, and a bad `--set` creates nothing; unknown or unconfigured flags are dropped with a warning.
 It is one request, retried only on a 429: after a 5xx or a lost connection, check the database before running it again.
 A `create` that fails before that request (a missing title, a value the schema rejects, a config error) exits 4, so running it again with fixed input is safe; any other failure exits 1, and the task may exist.
 Over the API, read verbs also retry a transient 5xx.

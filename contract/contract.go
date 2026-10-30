@@ -114,12 +114,13 @@ type Tracker interface {
 type NewTask struct {
 	Title    string
 	Body     string
-	Status   string   // the tracker's own word, as given
-	Priority string   // one of Priorities
-	Labels   []string // in the order given
-	Parent   string   // a task number
-	After    string   // a task number
-	Dropped  []string // flags create does not know, which the tracker warns about and drops
+	Status   string     // the tracker's own word, as given
+	Priority string     // one of Priorities
+	Labels   []string   // in the order given
+	Parent   string     // a task number
+	After    string     // a task number
+	Set      []KeyValue // other properties, by the tracker's config key, in the order given
+	Dropped  []string   // flags create does not know, which the tracker warns about and drops
 }
 
 // Creator is a Tracker that implements create. A tracker without it
@@ -247,6 +248,7 @@ func parseCreate(args []string, stdin io.Reader) (NewTask, error) {
 	var (
 		task   NewTask
 		labels labelFlag
+		sets   setFlag
 	)
 
 	fs := flag.NewFlagSet(VerbCreate, flag.ContinueOnError)
@@ -256,6 +258,7 @@ func parseCreate(args []string, stdin io.Reader) (NewTask, error) {
 	fs.Var(&labels, "label", "")
 	fs.StringVar(&task.Parent, "parent", "", "")
 	fs.StringVar(&task.After, "after", "", "")
+	fs.Var(&sets, "set", "")
 
 	// A property f10 adds to create later degrades to a warning instead of
 	// failing every driver built before it.
@@ -269,7 +272,7 @@ func parseCreate(args []string, stdin io.Reader) (NewTask, error) {
 		return task, fmt.Errorf("create takes no arguments, only flags; got %q", fs.Arg(0))
 	}
 
-	task.Labels = labels
+	task.Labels, task.Set = labels, sets
 
 	if task.Priority != "" && !IsPriority(task.Priority) {
 		return task, fmt.Errorf("create: --priority %q is not one of %s", task.Priority, strings.Join(Priorities, ", "))

@@ -123,6 +123,35 @@
      }
     ]
    }
+  },
+  "Kind": {
+   "id": "K",
+   "name": "Kind",
+   "type": "select",
+   "select": {
+    "options": [
+     {
+      "name": "Feature"
+     },
+     {
+      "name": "Bug"
+     }
+    ]
+   }
+  },
+  "Points": {
+   "id": "N",
+   "name": "Points",
+   "type": "number",
+   "number": {
+    "format": "number"
+   }
+  },
+  "Reviewed": {
+   "id": "C",
+   "name": "Reviewed",
+   "type": "checkbox",
+   "checkbox": {}
   }
  }
 }

@@ -444,25 +444,10 @@ func (m *mcpBackend) Comments(ctx context.Context, pageID string) ([]Comment, er
 	return comments, nil
 }
 
-// CreatePage runs notion-create-pages with the properties in its SQLite
+// CreatePage runs notion-create-pages with the properties in their SQLite
 // value form, then fetches the new page for its Unique ID.
 func (m *mcpBackend) CreatePage(ctx context.Context, np Draft) (*Page, error) {
-	props := make(map[string]any, len(np.Properties))
-
-	for name, v := range np.Properties {
-		switch v.Type {
-		case "title":
-			props[valueKey(name)] = v.Text
-		case "relation":
-			props[valueKey(name)] = v.Pages
-		case "multi_select":
-			props[valueKey(name)] = v.Names
-		default: // status, select
-			if len(v.Names) > 0 {
-				props[valueKey(name)] = v.Names[0]
-			}
-		}
-	}
+	props := sqliteValues(np.Properties)
 
 	pg := map[string]any{"properties": props}
 	if np.Markdown != "" {
@@ -496,53 +481,7 @@ func (m *mcpBackend) CreatePage(ctx context.Context, np Draft) (*Page, error) {
 // UpdatePage runs notion-update-page's update_properties with the values in
 // their SQLite form. The values are absolute, so it is retried like a read.
 func (m *mcpBackend) UpdatePage(ctx context.Context, pageID string, props map[string]Value) error {
-	values := map[string]any{}
-
-	for name, v := range props {
-		key := valueKey(name)
-
-		switch v.Type {
-		case "date":
-			// The end goes too, so a range collapses to the new date as over REST.
-			start, end := "date:"+name+":start", "date:"+name+":end"
-			values[end] = nil
-
-			if v.Clear {
-				values[start] = nil
-
-				continue
-			}
-
-			values[start] = v.Text
-			values["date:"+name+":is_datetime"] = map[bool]int{true: 1, false: 0}[len(v.Text) > len(time.DateOnly)]
-		case "checkbox":
-			values[key] = map[bool]string{true: "__YES__", false: "__NO__"}[v.Checkbox != nil && *v.Checkbox]
-		case "people":
-			values[key] = v.People
-		case "multi_select":
-			values[key] = v.Names
-		case "relation":
-			values[key] = v.Pages
-		case "status", "select":
-			if v.Clear || len(v.Names) == 0 {
-				values[key] = nil
-			} else {
-				values[key] = v.Names[0]
-			}
-		case "number":
-			if v.Clear {
-				values[key] = nil
-			} else {
-				values[key] = v.Number
-			}
-		default: // url, rich_text, email, phone_number, title
-			if v.Clear {
-				values[key] = nil
-			} else {
-				values[key] = v.Text
-			}
-		}
-	}
+	values := sqliteValues(props)
 
 	args := map[string]any{
 		"page_id":     dashed(pageID),
@@ -977,4 +916,58 @@ func bareURL(u string) string {
 	u, _, _ = strings.Cut(u, "?")
 
 	return u
+}
+
+// sqliteValues renders property values in the SQLite form the create and
+// update tools take.
+func sqliteValues(props map[string]Value) map[string]any {
+	values := map[string]any{}
+
+	for name, v := range props {
+		key := valueKey(name)
+
+		switch v.Type {
+		case "date":
+			// The end goes too, so a range collapses to the new date as over REST.
+			start, end := "date:"+name+":start", "date:"+name+":end"
+			values[end] = nil
+
+			if v.Clear {
+				values[start] = nil
+
+				continue
+			}
+
+			values[start] = v.Text
+			values["date:"+name+":is_datetime"] = map[bool]int{true: 1, false: 0}[len(v.Text) > len(time.DateOnly)]
+		case "checkbox":
+			values[key] = map[bool]string{true: "__YES__", false: "__NO__"}[v.Checkbox != nil && *v.Checkbox]
+		case "people":
+			values[key] = v.People
+		case "multi_select":
+			values[key] = v.Names
+		case "relation":
+			values[key] = v.Pages
+		case "status", "select":
+			if v.Clear || len(v.Names) == 0 {
+				values[key] = nil
+			} else {
+				values[key] = v.Names[0]
+			}
+		case "number":
+			if v.Clear {
+				values[key] = nil
+			} else {
+				values[key] = v.Number
+			}
+		default: // url, rich_text, email, phone_number, title
+			if v.Clear {
+				values[key] = nil
+			} else {
+				values[key] = v.Text
+			}
+		}
+	}
+
+	return values
 }

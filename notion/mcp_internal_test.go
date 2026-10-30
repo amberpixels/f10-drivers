@@ -127,7 +127,7 @@ func TestShortErrorKeepsOneLine(t *testing.T) {
 	}
 }
 
-// TestPageReadsSettableValues reads the values update --set writes, the
+// TestPageReadsSettableValues reads the values --set writes, the
 // date from its expanded keys, as display shows them.
 func TestPageReadsSettableValues(t *testing.T) {
 	m := &mcpBackend{

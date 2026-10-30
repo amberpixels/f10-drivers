@@ -30,7 +30,7 @@ var wantTypes = map[string][]string{
 	"after":    {"relation"},
 }
 
-// settableTypes are the property types update --set can write.
+// settableTypes are the property types --set can write.
 var settableTypes = []string{
 	"url", "rich_text", "number", "checkbox", "date", "email", "phone_number", "select", "status", "multi_select",
 }
@@ -310,9 +310,10 @@ func (t *Tracker) Children(ctx context.Context, number string) ([]contract.Child
 	return children, nil
 }
 
-// Create makes a page for the task and returns its id. Every property value
-// is checked against the schema before the page is created: Notion rejects
-// an unknown status, and would add an unknown label to the schema.
+// Create makes a page for the task and returns its id. Every property value,
+// --set included, is checked against the schema before the page is created:
+// Notion rejects an unknown status, and would add an unknown label to the
+// schema.
 func (t *Tracker) Create(ctx context.Context, task contract.NewTask) (string, error) {
 	ds, draft, err := t.draft(ctx, task)
 	if err != nil {
@@ -467,6 +468,24 @@ func (t *Tracker) draft(ctx context.Context, task contract.NewTask) (*DataSource
 		}
 
 		props[t.props.Labels] = Value{Type: ds.Properties[t.props.Labels].Type, Names: names}
+	}
+
+	for _, kv := range task.Set {
+		if kv.Key == "assignee" {
+			return nil, Draft{}, errors.New(
+				"--set assignee: create takes no assignee; set it with update <n> --assignee",
+			)
+		}
+
+		name, v, err := t.setValue(kv.Key, kv.Value)
+		if err != nil {
+			return nil, Draft{}, err
+		}
+
+		// A new page has nothing to clear.
+		if !v.Clear {
+			props[name] = v
+		}
 	}
 
 	for _, f := range []struct{ flag, number, prop string }{
@@ -889,7 +908,7 @@ func (t *Tracker) dataSource(ctx context.Context) (*DataSource, error) {
 		}
 
 		if !slices.Contains(settableTypes, s.Type) {
-			return nil, fmt.Errorf("notion.properties.%s: %q is a %s property; update --set writes %s",
+			return nil, fmt.Errorf("notion.properties.%s: %q is a %s property; --set writes %s",
 				key, name, s.Type, strings.Join(settableTypes, ", "))
 		}
 	}

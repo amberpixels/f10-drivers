@@ -133,7 +133,7 @@ func TestLoadExtraProperties(t *testing.T) {
 	for _, tc := range []struct{ name, notion, props, err string }{
 		{"extras", "", "result = \"Result URL\"\ndue_date = \"Due\"", ""},
 		{"not a string", "", "result = 3", "notion.properties.result: want a property name"},
-		{"bad key", "", "Result = \"Result\"", "notion.properties.Result: a key update --set names"},
+		{"bad key", "", "Result = \"Result\"", "notion.properties.Result: a key --set names"},
 		{"swapped letters", "", "stauts = \"Status\"", "notion.properties.stauts: did you mean status?"},
 		{"missing letter", "", "label = \"Tags\"", "notion.properties.label: did you mean labels?"},
 		{"unknown notion key", "dun = [\"Done\"]", "", "unknown key notion.dun"},

@@ -61,7 +61,7 @@ type Properties struct {
 	Parent   string `toml:"parent"`
 	After    string `toml:"after"`
 
-	// Extra is every other key: a property update --set writes, by its key.
+	// Extra is every other key: a property create and update --set write, by its key.
 	Extra map[string]string `toml:"-"`
 }
 
@@ -98,7 +98,7 @@ func (p *Properties) UnmarshalTOML(v any) error {
 
 		if !extraKey.MatchString(key) {
 			return fmt.Errorf(
-				"notion.properties.%s: a key update --set names takes lowercase letters, digits and _",
+				"notion.properties.%s: a key --set names takes lowercase letters, digits and _",
 				key,
 			)
 		}
