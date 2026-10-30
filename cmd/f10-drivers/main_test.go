@@ -33,6 +33,7 @@ assignee = "Assignee"
 labels = "Tags"
 result = "Result"
 due = "Due"
+feature = "Feature"
 %s
 
 [notion.priority]
@@ -180,6 +181,7 @@ func TestConfigErrors(t *testing.T) {
 		{"bad level", strings.Replace(notionConfig, "urgent =", "critical =", 1), "", "notion.priority.critical"},
 		{"missing property", strings.Replace(notionConfig, "%s", `parent = "Mother"`, 1), "", `notion.properties.parent: the data source has no property "Mother"`},
 		{"wrong type", strings.Replace(notionConfig, "%s", `parent = "Tags"`, 1), "", `"Tags" is a multi_select property, want relation`},
+		{"property mapped twice", strings.Replace(notionConfig, "%s", `tags = "Tags"`, 1), "", `notion.properties.tags: "Tags" is already mapped by notion.properties.labels`},
 		{"no token", notionConfig, "MKT_NOTION_TOKEN=", "MKT_NOTION_TOKEN is not set"},
 		{"prefix mismatch", strings.Replace(notionConfig, `prefix = "MKT"`, `prefix = "MK"`, 1), "", `prefix is "MK", but Notion's "ID" property is prefixed "MKT"`},
 		{"unknown done status", strings.Replace(notionConfig, `done = ["Done"]`, `done = ["Shipped"]`, 1), "", `notion.done: "Shipped" is not an option of "Status"`},
@@ -758,6 +760,23 @@ func TestNotionUpdate(t *testing.T) {
 		if strings.Contains(res.Stdout, "Due:") || !strings.Contains(res.Stdout, "Assignee: Ann Lee\n") {
 			t.Errorf("want Due cleared and Ann Lee assigned:\n%s", res.Stdout)
 		}
+
+		// A multi_select --set takes option names in any case and replaces the options.
+		for _, tc := range []struct{ set, want string }{
+			{"feature=onboarding, Billing,ONBOARDING", "Feature: Onboarding, Billing\n"},
+			{"feature=Search", "Feature: Search\n"},
+			{"feature=", ""},
+		} {
+			if res = run(t, "", "update", "3", "--set", tc.set); res.Code != 0 {
+				t.Fatalf("--set %s: exit %d: %s", tc.set, res.Code, res.Stderr)
+			}
+
+			res = run(t, "", "read", "3")
+			if tc.want == "" && strings.Contains(res.Stdout, "Feature:") ||
+				tc.want != "" && !strings.Contains(res.Stdout, tc.want) {
+				t.Errorf("--set %s: want %q in read:\n%s", tc.set, tc.want, res.Stdout)
+			}
+		}
 	})
 }
 
@@ -772,11 +791,13 @@ func TestNotionUpdateRejectsBeforeSending(t *testing.T) {
 		{"positional", []string{"--status", "Done", "extra"}, `got "extra"`},
 		{"status", []string{"--status", "Blocked"}, `--status "Blocked": no option of "Status" matches`},
 		{"label", []string{"--label", "ads"}, `--label "ads" is not an option of "Tags"`},
-		{"unknown key", []string{"--set", "owner=x"}, "--set owner: not a key of [notion.properties] (due, result)"},
+		{"unknown key", []string{"--set", "owner=x"}, "--set owner: not a key of [notion.properties] (due, feature, result)"},
 		{"fixed key", []string{"--set", "labels=x"}, "--set labels: use --label"},
 		{"no equals", []string{"--set", "result"}, `want key=value, got "result"`},
 		{"bad url", []string{"--set", "result=example.com"}, `"Result" is a url property, want an absolute http(s) url`},
 		{"bad date", []string{"--set", "due=next week"}, `"Due" is a date property, want a date`},
+		{"no such option", []string{"--set", "feature=Billing,Ads"}, `"Ads" is not an option of "Feature" (Onboarding, Billing, Search)`},
+		{"empty option", []string{"--set", "feature=Billing,"}, `want a comma-separated list of option names`},
 		{"no such user", []string{"--assignee", "zed@example.com"}, "no Notion user has that email"},
 		{"two users", []string{"--assignee", "Sam Park"}, `matches 2 users (Sam Park <sam.park@example.com>, Sam Park <sam.p@example.com>)`},
 		{"missing task", []string{"--status", "Done"}, "MKT-99 not found"},

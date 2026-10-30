@@ -105,6 +105,24 @@
    "name": "Due",
    "type": "date",
    "date": {}
+  },
+  "Feature": {
+   "id": "F",
+   "name": "Feature",
+   "type": "multi_select",
+   "multi_select": {
+    "options": [
+     {
+      "name": "Onboarding"
+     },
+     {
+      "name": "Billing"
+     },
+     {
+      "name": "Search"
+     }
+    ]
+   }
   }
  }
 }

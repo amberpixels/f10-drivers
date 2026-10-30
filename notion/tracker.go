@@ -32,7 +32,7 @@ var wantTypes = map[string][]string{
 
 // settableTypes are the property types update --set can write.
 var settableTypes = []string{
-	"url", "rich_text", "number", "checkbox", "date", "email", "phone_number", "select", "status",
+	"url", "rich_text", "number", "checkbox", "date", "email", "phone_number", "select", "status", "multi_select",
 }
 
 // Tracker is the Notion contract.Tracker.
@@ -600,6 +600,29 @@ func (t *Tracker) setValue(key, raw string) (string, Value, error) {
 		}
 
 		v.Names = []string{names[j]}
+	case "multi_select":
+		// Notion allows no comma in an option name, so the split is unambiguous.
+		var picked []string
+
+		for piece := range strings.SplitSeq(raw, ",") {
+			piece = strings.TrimSpace(piece)
+			if piece == "" {
+				return "", v, bad("a comma-separated list of option names")
+			}
+
+			if indexFold(picked, piece) < 0 {
+				picked = append(picked, piece)
+			}
+		}
+
+		exact, err := optionNames(t.ds.Properties[name], picked, func(n string) string {
+			return fmt.Sprintf("--set %s=%q: %q is not an option of %q", key, raw, n, name)
+		})
+		if err != nil {
+			return "", v, err
+		}
+
+		v.Names = exact
 	default: // rich_text, email, phone_number
 		v.Text = raw
 	}
@@ -641,20 +664,35 @@ func (t *Tracker) optionFor(flag, value string) (string, error) {
 // returns the options' exact names; a select property holds one label.
 func (t *Tracker) labelNames(labels []string) ([]string, error) {
 	prop := t.props.Labels
-	names := options(t.ds.Properties[prop])
-	exact := make([]string, 0, len(labels))
 
-	for _, l := range labels {
-		j := indexFold(names, l)
-		if j < 0 {
-			return nil, fmt.Errorf("--label %q is not an option of %q (%s)", l, prop, strings.Join(names, ", "))
-		}
-
-		exact = append(exact, names[j])
+	exact, err := optionNames(t.ds.Properties[prop], labels, func(l string) string {
+		return fmt.Sprintf("--label %q is not an option of %q", l, prop)
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	if t.ds.Properties[prop].Type == "select" && len(exact) > 1 {
 		return nil, fmt.Errorf("--label: %q is a select property and holds one label, got %d", prop, len(exact))
+	}
+
+	return exact, nil
+}
+
+// optionNames matches each value to an option of s, case-insensitively,
+// and returns the options' exact names; miss words the error for a value
+// that matches none, before the options are listed.
+func optionNames(s PropertySchema, values []string, miss func(string) string) ([]string, error) {
+	names := options(s)
+	exact := make([]string, 0, len(values))
+
+	for _, v := range values {
+		j := indexFold(names, v)
+		if j < 0 {
+			return nil, fmt.Errorf("%s (%s)", miss(v), strings.Join(names, ", "))
+		}
+
+		exact = append(exact, names[j])
 	}
 
 	return exact, nil
@@ -800,10 +838,12 @@ func (t *Tracker) dataSource(ctx context.Context) (*DataSource, error) {
 		}
 	}
 
-	for key, name := range map[string]string{
+	fixed := map[string]string{
 		"id": props.ID, "title": props.Title, "status": props.Status, "priority": props.Priority,
 		"assignee": props.Assignee, "labels": props.Labels, "parent": props.Parent, "after": props.After,
-	} {
+	}
+
+	for key, name := range fixed {
 		if name == "" {
 			continue
 		}
@@ -820,6 +860,18 @@ func (t *Tracker) dataSource(ctx context.Context) (*DataSource, error) {
 	}
 
 	for key, name := range props.Extra {
+		// Two keys on one property would let one update flag silently overwrite the other.
+		for fkey, fname := range fixed {
+			if fname == name {
+				return nil, fmt.Errorf(
+					"notion.properties.%s: %q is already mapped by notion.properties.%s",
+					key,
+					name,
+					fkey,
+				)
+			}
+		}
+
 		s, ok := ds.Properties[name]
 		if !ok {
 			return nil, fmt.Errorf("notion.properties.%s: the data source has no property %q", key, name)
@@ -888,6 +940,10 @@ func options(s PropertySchema) []string {
 		opts = s.MultiSelect.Options
 	}
 
+	return optionList(opts)
+}
+
+func optionList(opts []Option) []string {
 	names := make([]string, len(opts))
 	for i, o := range opts {
 		names[i] = o.Name
@@ -1015,12 +1071,7 @@ func (t *Tracker) labels(p *Page) []string {
 		return []string{prop.Select.Name}
 	}
 
-	labels := make([]string, 0, len(prop.MultiSelect))
-	for _, o := range prop.MultiSelect {
-		labels = append(labels, o.Name)
-	}
-
-	return labels
+	return optionList(prop.MultiSelect)
 }
 
 func optionName(p Property) string {
@@ -1055,6 +1106,8 @@ func display(p Property) string {
 		return p.Date.Start
 	case len(p.RichText) > 0:
 		return plain(p.RichText)
+	case len(p.MultiSelect) > 0:
+		return strings.Join(optionList(p.MultiSelect), ", ")
 	default:
 		return optionName(p)
 	}

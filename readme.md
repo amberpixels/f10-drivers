@@ -122,8 +122,8 @@ Values are checked against the schema before the page is made; unknown or unconf
 It is one request, retried only on a 429: after a 5xx or a lost connection, check the database before running it again.
 Over the API, read verbs also retry a transient 5xx.
 
-`update` takes the same `--status`, `--label` and `--priority <level>`, plus `--assignee <email|name>` and `--set <key>=<value>` for any other key under `[notion.properties]`: a url, text, number, checkbox (`true`/`false`), date (`YYYY-MM-DD` or RFC 3339), select, status, email or phone property.
-`--label` replaces the task's labels, `--assignee` replaces its people, and an empty `--set <key>=` clears the property.
+`update` takes the same `--status`, `--label` and `--priority <level>`, plus `--assignee <email|name>` and `--set <key>=<value>` for any other key under `[notion.properties]`: a url, text, number, checkbox (`true`/`false`), date (`YYYY-MM-DD` or RFC 3339), select, status, multi-select (comma-separated option names), email or phone property.
+`--label` replaces the task's labels, `--assignee` replaces its people, `--set` on a multi-select replaces its options, and an empty `--set <key>=` clears the property.
 Every value is checked before the request, and unlike `create`, an unknown or unconfigured flag fails the update with nothing sent.
 The values are absolute, so `update` retries a 429 and a transient 5xx like a read.
 Over the API, `--assignee <email>` needs the integration's "read user information including email addresses" capability; a name matching several users fails naming them.

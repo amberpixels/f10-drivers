@@ -134,12 +134,14 @@ func TestPageReadsSettableValues(t *testing.T) {
 		schema: map[string]PropertySchema{
 			"Result": {Type: "url"}, "Notes": {Type: "rich_text"}, "Hours": {Type: "number"},
 			"Shipped": {Type: "checkbox"}, "Due": {Type: "date"}, "Mail": {Type: "email"}, "Empty": {Type: "url"},
+			"Feature": {Type: "multi_select"},
 		},
 	}
 
 	p, err := m.page(t.Context(), "https://app.notion.com/p/2b000000000040008000000000000002", map[string]any{
 		"Result": "https://x.test/r", "Notes": "two words", "Hours": 1.5, "Shipped": "__YES__", "Mail": "a@x.test",
 		"date:Due:start": "2026-11-02", "date:Due:end": "2026-11-04", "date:Due:is_datetime": 0.0, "Empty": "",
+		"Feature": `["Billing","Search"]`,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -148,6 +150,7 @@ func TestPageReadsSettableValues(t *testing.T) {
 	for name, want := range map[string]string{
 		"Result": "https://x.test/r", "Notes": "two words", "Hours": "1.5", "Shipped": "Yes",
 		"Due": "2026-11-02 -> 2026-11-04", "Mail": "a@x.test", "Empty": "",
+		"Feature": "Billing, Search",
 	} {
 		if got := display(p.Properties[name]); got != want {
 			t.Errorf("%s = %q, want %q", name, got, want)
