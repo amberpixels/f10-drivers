@@ -273,3 +273,32 @@ func TestServeWritesDeclineWithoutTheInterface(t *testing.T) {
 		}
 	}
 }
+
+// TestServeCreateMarksParseErrors checks that Serve marks a create input
+// error as one from before any write, its message unchanged.
+func TestServeCreateMarksParseErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name, stdin string
+		args        []string
+		want        string
+	}{
+		{"no title", "no heading", nil, "# <title>"},
+		{"priority", "# T", []string{"--priority", "someday"}, `create: --priority "someday" is not one of`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stdin := strings.NewReader(tc.stdin)
+
+			err := contract.Serve(t.Context(), &creator{}, "create", tc.args, stdin, &bytes.Buffer{})
+			if !errors.Is(err, contract.ErrNotWritten) || !strings.Contains(err.Error(), tc.want) ||
+				strings.Contains(err.Error(), "nothing was written") {
+				t.Fatalf("err = %v, want it marked ErrNotWritten and naming %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestNotWrittenKeepsNil(t *testing.T) {
+	if err := contract.NotWritten(nil); err != nil {
+		t.Fatalf("NotWritten(nil) = %v, want nil", err)
+	}
+}

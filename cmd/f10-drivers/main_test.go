@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/amberpixels/f10-drivers/conformance"
+	"github.com/amberpixels/f10-drivers/contract"
 	"github.com/amberpixels/f10-drivers/notion/notiontest"
 )
 
@@ -369,14 +370,66 @@ func TestNotionCreateRejectsBeforeSending(t *testing.T) {
 			run := projectOn(t, srv, tc.cfg)
 
 			res := run(t, "# T", append([]string{"create"}, tc.args...)...)
-			if res.Code == 0 || !strings.Contains(res.Stderr, tc.want) {
-				t.Fatalf("want a failure naming %q, got exit %d, stderr %q", tc.want, res.Code, res.Stderr)
+			if res.Code != contract.ExitNotWritten || !strings.Contains(res.Stderr, tc.want) {
+				t.Fatalf("want exit %d naming %q, got exit %d, stderr %q",
+					contract.ExitNotWritten, tc.want, res.Code, res.Stderr)
 			}
 
 			if srv.Creates() != 0 {
 				t.Fatalf("POST /pages sent %d times, want none", srv.Creates())
 			}
 		})
+	}
+}
+
+// TestNotionCreateFailsBeforeWriting exits ExitNotWritten for input the
+// contract or the config rejects before a tracker exists.
+func TestNotionCreateFailsBeforeWriting(t *testing.T) {
+	base := strings.Replace(notionConfig, "%s", relations, 1)
+
+	for _, tc := range []struct {
+		name, cfg, stdin string
+		args             []string
+		want             string
+	}{
+		{"no title", base, "no heading", nil, "# <title>"},
+		{"priority level", base, "# T", []string{"--priority", "someday"}, `--priority "someday" is not one of`},
+		{"parent number", base, "# T", []string{"--parent", "MKT-2"}, "--parent needs a task number"},
+		{"config", "prefix = ", "# T", nil, "driver.toml"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := notiontest.New(t)
+			run := projectOn(t, srv, tc.cfg)
+
+			res := run(t, tc.stdin, append([]string{"create"}, tc.args...)...)
+			if res.Code != contract.ExitNotWritten || !strings.Contains(res.Stderr, tc.want) {
+				t.Fatalf("want exit %d naming %q, got exit %d, stderr %q",
+					contract.ExitNotWritten, tc.want, res.Code, res.Stderr)
+			}
+
+			if srv.Creates() != 0 {
+				t.Fatalf("POST /pages sent %d times, want none", srv.Creates())
+			}
+		})
+	}
+}
+
+// TestSetupFailureExitCode exits ExitNotWritten when the tracker cannot be
+// built for a create, and 1 for the same failure on another verb.
+func TestSetupFailureExitCode(t *testing.T) {
+	run := project(t, strings.Replace(notionConfig, "%s", "", 1), "MKT_NOTION_TOKEN=")
+
+	for verb, want := range map[string]int{"create": contract.ExitNotWritten, "read": 1} {
+		args := []string{verb}
+		if verb == "read" {
+			args = append(args, "2")
+		}
+
+		res := run(t, "# T", args...)
+		if res.Code != want || !strings.Contains(res.Stderr, "MKT_NOTION_TOKEN is not set") {
+			t.Errorf("%s: want exit %d naming the unset token, got exit %d, stderr %q",
+				verb, want, res.Code, res.Stderr)
+		}
 	}
 }
 
@@ -403,7 +456,7 @@ func TestNotionCreateNeverRetriesServerErrors(t *testing.T) {
 	res := run(t, "# T", "create")
 
 	want := "the task may have been created: check https://www.notion.so/" + notiontest.DatabaseID
-	if res.Code == 0 || !strings.Contains(res.Stderr, want) || srv.Creates() != 1 {
+	if res.Code != 1 || !strings.Contains(res.Stderr, want) || srv.Creates() != 1 {
 		t.Fatalf("want one request and a failure naming %q, got exit %d, %d request(s), stderr %q",
 			want, res.Code, srv.Creates(), res.Stderr)
 	}
@@ -580,7 +633,7 @@ func TestNotionMCPCreateNeverRetriesServerErrors(t *testing.T) {
 	res := run(t, "# T", "create")
 
 	want := "the task may have been created: check https://www.notion.so/" + notiontest.DatabaseID
-	if res.Code == 0 || !strings.Contains(res.Stderr, want) || srv.Creates() != 1 {
+	if res.Code != 1 || !strings.Contains(res.Stderr, want) || srv.Creates() != 1 {
 		t.Fatalf("want one call and a failure naming %q, got exit %d, %d call(s), stderr %q",
 			want, res.Code, srv.Creates(), res.Stderr)
 	}

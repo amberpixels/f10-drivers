@@ -314,59 +314,12 @@ func (t *Tracker) Children(ctx context.Context, number string) ([]contract.Child
 // is checked against the schema before the page is created: Notion rejects
 // an unknown status, and would add an unknown label to the schema.
 func (t *Tracker) Create(ctx context.Context, task contract.NewTask) (string, error) {
-	ds, err := t.dataSource(ctx)
+	ds, draft, err := t.draft(ctx, task)
 	if err != nil {
-		return "", err
+		return "", contract.NotWritten(err)
 	}
 
-	for _, name := range task.Dropped {
-		_, _ = fmt.Fprintf(t.warn, "warn: --%s dropped: create does not know it\n", name)
-	}
-
-	props := map[string]Value{t.props.Title: {Type: "title", Text: task.Title}}
-
-	for _, f := range []struct{ flag, value, prop string }{
-		{"status", task.Status, t.props.Status},
-		{"priority", task.Priority, t.props.Priority},
-	} {
-		if f.value == "" || !t.configured(f.flag, f.prop) {
-			continue
-		}
-
-		name, err := t.optionFor(f.flag, f.value)
-		if err != nil {
-			return "", err
-		}
-
-		props[f.prop] = Value{Type: ds.Properties[f.prop].Type, Names: []string{name}}
-	}
-
-	if len(task.Labels) > 0 && t.configured("label", t.props.Labels) {
-		names, err := t.labelNames(task.Labels)
-		if err != nil {
-			return "", err
-		}
-
-		props[t.props.Labels] = Value{Type: ds.Properties[t.props.Labels].Type, Names: names}
-	}
-
-	for _, f := range []struct{ flag, number, prop string }{
-		{"parent", task.Parent, t.props.Parent},
-		{"after", task.After, t.props.After},
-	} {
-		if f.number == "" || !t.configured(f.flag, f.prop) {
-			continue
-		}
-
-		p, err := t.find(ctx, f.number)
-		if err != nil {
-			return "", fmt.Errorf("--%s: %w", f.flag, err)
-		}
-
-		props[f.prop] = Value{Type: "relation", Pages: []string{p.ID}}
-	}
-
-	page, err := t.b.CreatePage(ctx, Draft{DataSource: ds.ID, Properties: props, Markdown: task.Body})
+	page, err := t.b.CreatePage(ctx, draft)
 
 	if _, ok := errors.AsType[*UnknownOutcomeError](err); ok {
 		return "", fmt.Errorf(
@@ -475,6 +428,64 @@ func (t *Tracker) Comment(ctx context.Context, number, markdown string) (string,
 	}
 
 	return id, err
+}
+
+// draft reads the schema and checks every property value against it, all
+// before any write, so its errors leave nothing behind.
+func (t *Tracker) draft(ctx context.Context, task contract.NewTask) (*DataSource, Draft, error) {
+	ds, err := t.dataSource(ctx)
+	if err != nil {
+		return nil, Draft{}, err
+	}
+
+	for _, name := range task.Dropped {
+		_, _ = fmt.Fprintf(t.warn, "warn: --%s dropped: create does not know it\n", name)
+	}
+
+	props := map[string]Value{t.props.Title: {Type: "title", Text: task.Title}}
+
+	for _, f := range []struct{ flag, value, prop string }{
+		{"status", task.Status, t.props.Status},
+		{"priority", task.Priority, t.props.Priority},
+	} {
+		if f.value == "" || !t.configured(f.flag, f.prop) {
+			continue
+		}
+
+		name, err := t.optionFor(f.flag, f.value)
+		if err != nil {
+			return nil, Draft{}, err
+		}
+
+		props[f.prop] = Value{Type: ds.Properties[f.prop].Type, Names: []string{name}}
+	}
+
+	if len(task.Labels) > 0 && t.configured("label", t.props.Labels) {
+		names, err := t.labelNames(task.Labels)
+		if err != nil {
+			return nil, Draft{}, err
+		}
+
+		props[t.props.Labels] = Value{Type: ds.Properties[t.props.Labels].Type, Names: names}
+	}
+
+	for _, f := range []struct{ flag, number, prop string }{
+		{"parent", task.Parent, t.props.Parent},
+		{"after", task.After, t.props.After},
+	} {
+		if f.number == "" || !t.configured(f.flag, f.prop) {
+			continue
+		}
+
+		p, err := t.find(ctx, f.number)
+		if err != nil {
+			return nil, Draft{}, fmt.Errorf("--%s: %w", f.flag, err)
+		}
+
+		props[f.prop] = Value{Type: "relation", Pages: []string{p.ID}}
+	}
+
+	return ds, Draft{DataSource: ds.ID, Properties: props, Markdown: task.Body}, nil
 }
 
 func unconfigured(flag string) error {

@@ -52,6 +52,28 @@ const ExitUnsupported = 3
 // ErrUnsupported is what a Tracker returns for a verb it does not implement.
 var ErrUnsupported = errors.New("verb not implemented by this tracker")
 
+// ExitNotWritten is the exit code for a create that failed before it sent
+// any write, so running it again with fixed input cannot make the task twice.
+// Every other failure of create may have made the task.
+const ExitNotWritten = 4
+
+// ErrNotWritten marks an error from before any write; see NotWritten.
+var ErrNotWritten = errors.New("nothing was written")
+
+// NotWritten marks err as a failure before any write, keeping its message,
+// so the binary exits ExitNotWritten for it. A nil err stays nil.
+func NotWritten(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	return notWrittenError{err}
+}
+
+type notWrittenError struct{ error }
+
+func (e notWrittenError) Unwrap() []error { return []error{e.error, ErrNotWritten} }
+
 // Row is one task in a search or list answer.
 type Row struct {
 	ID       string `json:"id"`
@@ -101,7 +123,9 @@ type NewTask struct {
 }
 
 // Creator is a Tracker that implements create. A tracker without it
-// declines the verb.
+// declines the verb. Create wraps an error from before its write with
+// NotWritten, so the binary exits ExitNotWritten; an error from the write or
+// after it stays unmarked, because the task may exist.
 type Creator interface {
 	Create(ctx context.Context, task NewTask) (string, error)
 }
@@ -164,7 +188,7 @@ func Serve(ctx context.Context, t Tracker, verb string, args []string, stdin io.
 
 		task, err := parseCreate(args, stdin)
 		if err != nil {
-			return err
+			return NotWritten(err)
 		}
 
 		return line(w)(c.Create(ctx, task))

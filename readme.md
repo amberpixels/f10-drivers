@@ -120,6 +120,7 @@ The driver checks the config against the database: unknown keys, missing or mist
 `create` takes `--status`, `--label`, `--priority <level>`, `--parent <n>` and `--after <n>`, mapped through `[notion.properties]`.
 Values are checked against the schema before the page is made; unknown or unconfigured flags are dropped with a warning.
 It is one request, retried only on a 429: after a 5xx or a lost connection, check the database before running it again.
+A `create` that fails before that request (a missing title, a value the schema rejects, a config error) exits 4, so running it again with fixed input is safe; any other failure exits 1, and the task may exist.
 Over the API, read verbs also retry a transient 5xx.
 
 `update` takes the same `--status`, `--label` and `--priority <level>`, plus `--assignee <email|name>` and `--set <key>=<value>` for any other key under `[notion.properties]`: a url, text, number, checkbox (`true`/`false`), date (`YYYY-MM-DD` or RFC 3339), select, status, multi-select (comma-separated option names), email or phone property.

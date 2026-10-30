@@ -34,7 +34,9 @@ verbs:    read, url, search, branch, children, index, list,
           comment <n> < comment.md
           update <n> [--status <s>] [--priority <p>] [--label <l>]... [--assignee <email|name>]
                      [--set <key>=<value>]...
-config:   .f10/driver.toml under the working directory, unless --config names one`
+config:   .f10/driver.toml under the working directory, unless --config names one
+exit:     3 the verb is not implemented; 4 create failed before writing, so rerunning it is safe;
+          any other non-zero after create means the task may exist`
 
 const exitUsage = 2
 
@@ -177,14 +179,23 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return 0
 	}
 
+	// No tracker means no write, so a create failing here is safe to rerun.
+	setupFailed := func(err error) int {
+		if verb == contract.VerbCreate {
+			err = contract.NotWritten(err)
+		}
+
+		return fail(stderr, err)
+	}
+
 	cfg, err := config.Load(inv.config)
 	if err != nil {
-		return fail(stderr, err)
+		return setupFailed(err)
 	}
 
 	tracker, err := newTracker(ctx, cfg, stderr)
 	if err != nil {
-		return fail(stderr, err)
+		return setupFailed(err)
 	}
 
 	err = contract.Serve(ctx, tracker, verb, verbArgs, stdin, stdout)
@@ -240,6 +251,10 @@ func parseArgs(args []string) (invocation, error) {
 
 func fail(stderr io.Writer, err error) int {
 	_, _ = fmt.Fprintf(stderr, "f10-drivers: %v\n", err)
+
+	if errors.Is(err, contract.ErrNotWritten) {
+		return contract.ExitNotWritten
+	}
 
 	return 1
 }
