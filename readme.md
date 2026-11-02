@@ -119,6 +119,7 @@ The driver checks the config against the database: unknown keys, missing or mist
 
 `create` takes `--status`, `--label`, `--priority <level>`, `--parent <n>` and `--after <n>`, mapped through `[notion.properties]`, and `--set <key>=<value>` with the keys and value types `update` takes.
 Values are checked against the schema before the page is made, and a bad `--set` creates nothing; unknown or unconfigured flags are dropped with a warning.
+An unconfigured `--after` is dropped silently when the body already has an `After:` line naming the same task, plain or as a link, because that line is the record.
 It is one request, retried only on a 429: after a 5xx or a lost connection, check the database before running it again.
 A `create` that fails before that request (a missing title, a value the schema rejects, a config error) exits 4, so running it again with fixed input is safe; any other failure exits 1, and the task may exist.
 Over the API, read verbs also retry a transient 5xx.

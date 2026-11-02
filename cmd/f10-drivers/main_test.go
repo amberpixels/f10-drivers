@@ -528,18 +528,40 @@ func TestNotionCreateNeverRetriesServerErrors(t *testing.T) {
 }
 
 func TestNotionCreateDropsUnconfiguredProperties(t *testing.T) {
-	run := project(t, strings.Replace(notionConfig, "%s", "", 1))
+	cfg := strings.Replace(notionConfig, "%s", "", 1)
+	cfg = strings.Replace(cfg, "status = \"Status\"\n", "", 1)
+	cfg = strings.Replace(cfg, "priority = \"Priority\"\n", "", 1)
+	run := project(t, cfg)
 
-	res := run(t, newTask, "create", "--parent", "2", "--after", "3", "--assignee", "ann")
+	res := run(t, newTask, "create", "--parent", "2", "--after", "3", "--assignee", "ann",
+		"--status", "in progress", "--priority", "urgent")
 	if res.Code != 0 || !strings.Contains(res.Stderr, "warn: --parent dropped") ||
-		!strings.Contains(res.Stderr, "warn: --after dropped") ||
+		!strings.Contains(res.Stderr, "warn: --status dropped") ||
+		!strings.Contains(res.Stderr, "warn: --priority dropped") ||
 		!strings.Contains(res.Stderr, "warn: --assignee dropped: create does not know it") {
 		t.Fatalf("exit %d, stderr %q", res.Code, res.Stderr)
+	}
+
+	// The body ends in After: MKT-3, so dropping --after loses nothing.
+	if strings.Contains(res.Stderr, "--after") {
+		t.Fatalf("warned about --after the body already records: %q", res.Stderr)
 	}
 
 	// Without the relation the body's After: line is the only record of it.
 	if res = run(t, "", "read", "6"); !strings.Contains(res.Stdout, "After: MKT-3") {
 		t.Fatalf("read lost the After: line:\n%s", res.Stdout)
+	}
+
+	// f10 sends the line as a link to the blocker, and that is a record too.
+	linked := "# T\n\nAfter: [MKT-3: Book the venue](https://www.notion.so/mkt-3)\n\nMore text.\n"
+	if res = run(t, linked, "create", "--after", "3"); res.Code != 0 || strings.Contains(res.Stderr, "--after") {
+		t.Fatalf("exit %d, stderr %q", res.Code, res.Stderr)
+	}
+
+	// With no After: line in the body, --after is the only record, so it warns.
+	res = run(t, "# Plan the launch email", "create", "--after", "3")
+	if res.Code != 0 || !strings.Contains(res.Stderr, "warn: --after dropped") {
+		t.Fatalf("exit %d, stderr %q", res.Code, res.Stderr)
 	}
 }
 

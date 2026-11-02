@@ -492,7 +492,17 @@ func (t *Tracker) draft(ctx context.Context, task contract.NewTask) (*DataSource
 		{"parent", task.Parent, t.props.Parent},
 		{"after", task.After, t.props.After},
 	} {
-		if f.number == "" || !t.configured(f.flag, f.prop) {
+		if f.number == "" {
+			continue
+		}
+
+		// The body's closing After: line is what f10 reads the blocker from,
+		// so without a property to go to nothing is lost and no warning is due.
+		if f.flag == "after" && f.prop == "" && namesAfter(task.Body, t.id(f.number)) {
+			continue
+		}
+
+		if !t.configured(f.flag, f.prop) {
 			continue
 		}
 
@@ -734,6 +744,34 @@ func endsWithLine(text, line string) bool {
 	text = strings.TrimRight(text, " \t\r\n")
 
 	return strings.TrimSpace(text[strings.LastIndex(text, "\n")+1:]) == line
+}
+
+// namesAfter reports whether any line of body is an After: line naming id,
+// read as f10 reads it: any key case, the id bare or as a markdown link
+// whose text is "<id>: <title>".
+func namesAfter(body, id string) bool {
+	for line := range strings.SplitSeq(body, "\n") {
+		if line == "" || line[0] == ' ' || line[0] == '\t' {
+			continue
+		}
+
+		key, value, ok := strings.Cut(line, ":")
+		if !ok || !strings.EqualFold(strings.Trim(key, "*` "), "after") {
+			continue
+		}
+
+		value = strings.Trim(value, "*` \t\r")
+		if text, ok := strings.CutPrefix(value, "["); ok && strings.Contains(text, "](") {
+			text, _, _ = strings.Cut(text, "](")
+			value, _, _ = strings.Cut(text, ":")
+		}
+
+		if strings.EqualFold(strings.TrimSpace(value), id) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (t *Tracker) rows(ctx context.Context, q Query) ([]contract.Row, error) {
