@@ -195,14 +195,14 @@ func (t *Tracker) Read(ctx context.Context, number string) (string, error) {
 	return b.String(), nil
 }
 
-// URL prints the task's page url.
+// URL prints the task's url: the configured template, else the page url.
 func (t *Tracker) URL(ctx context.Context, number string) (string, error) {
 	p, err := t.find(ctx, number)
 	if err != nil {
 		return "", err
 	}
 
-	return p.URL, nil
+	return t.pageURL(p), nil
 }
 
 // Branch fills the configured branch template from the task's title.
@@ -806,7 +806,7 @@ func (t *Tracker) row(ctx context.Context, p *Page) (contract.Row, error) {
 		ID:      t.taskID(p),
 		Title:   t.title(p),
 		Status:  optionName(p.Properties[t.props.Status]),
-		URL:     p.URL,
+		URL:     t.pageURL(p),
 		Created: p.CreatedTime,
 	}
 
@@ -1117,12 +1117,34 @@ func (t *Tracker) idOf(ctx context.Context, pageID string) (string, error) {
 }
 
 func (t *Tracker) taskID(p *Page) string {
-	u := p.Properties[t.props.ID].UniqueID
-	if u == nil || u.Number == nil || (u.Prefix != nil && *u.Prefix != "" && *u.Prefix != t.cfg.Prefix) {
-		return "" // not a task of this database
+	number, ok := t.number(p)
+	if !ok {
+		return ""
 	}
 
-	return t.id(strconv.Itoa(*u.Number))
+	return t.id(number)
+}
+
+// number reads the page's unique-ID number, false when the page is not a
+// task of this database.
+func (t *Tracker) number(p *Page) (string, bool) {
+	u := p.Properties[t.props.ID].UniqueID
+	if u == nil || u.Number == nil || (u.Prefix != nil && *u.Prefix != "" && *u.Prefix != t.cfg.Prefix) {
+		return "", false
+	}
+
+	return strconv.Itoa(*u.Number), true
+}
+
+// pageURL is the url template filled for the page, else Notion's own url:
+// the template addresses a task by number, so a page without one keeps it.
+func (t *Tracker) pageURL(p *Page) string {
+	number, ok := t.number(p)
+	if t.cfg.URL == "" || !ok {
+		return p.URL
+	}
+
+	return t.cfg.TaskURL(t.id(number), number)
 }
 
 func (t *Tracker) id(number string) string { return t.cfg.Prefix + "-" + number }

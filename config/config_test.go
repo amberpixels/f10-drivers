@@ -168,3 +168,47 @@ func TestLoadExtraProperties(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadURL(t *testing.T) {
+	const base = "prefix = \"MKT\"\n%s\n[notion]\ndatabase = \"1a2b3c4d00004000800000000000db01\"\n[notion.properties]\nid = \"ID\"\n"
+
+	for _, tc := range []struct{ name, line, want, err string }{
+		{"unset", "", "", ""},
+		{"number", `url = "https://app.notion.com/p/ws/mkt-{number}"`, "https://app.notion.com/p/ws/mkt-3", ""},
+		{"id", `url = "http://tasks.example/{id}?n={number}"`, "http://tasks.example/MKT-3?n=3", ""},
+		{"no scheme", `url = "app.notion.com/p/ws/mkt-{number}"`, "", `url: "app.notion.com/p/ws/mkt-{number}" is not an http(s) url`},
+		{"no placeholder", `url = "https://app.notion.com/p/ws"`, "", "names neither {id} nor {number}"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "driver.toml")
+			if err := os.WriteFile(path, []byte(strings.Replace(base, "%s", tc.line, 1)), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			cfg, err := config.Load(path)
+			if tc.err != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.err) {
+					t.Fatalf("err = %v, want %q", err, tc.err)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if tc.want == "" {
+				if cfg.URL != "" {
+					t.Errorf("URL = %q, want it unset", cfg.URL)
+				}
+
+				return
+			}
+
+			if got := cfg.TaskURL("MKT-3", "3"); got != tc.want {
+				t.Errorf("TaskURL = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

@@ -26,6 +26,7 @@ const DefaultBranch = "{id}/{slug}"
 type Config struct {
 	Prefix string  `toml:"prefix"` // the task id prefix: "MKT" makes "MKT-12"
 	Branch string  `toml:"branch"` // a template over {id}, {number} and {slug}; DefaultBranch when empty
+	URL    string  `toml:"url"`    // a template over {id} and {number}; the tracker's own page url when empty
 	Notion *Notion `toml:"notion"`
 
 	Path string `toml:"-"` // the file Load read, for error messages
@@ -326,6 +327,11 @@ func (c *Config) BranchName(id, number, title string) string {
 	return strings.TrimRight(name, "/-._")
 }
 
+// TaskURL fills the url template for a task.
+func (c *Config) TaskURL(id, number string) string {
+	return strings.NewReplacer("{id}", id, "{number}", number).Replace(c.URL)
+}
+
 func (c *Config) validate() error {
 	if c.Prefix == "" {
 		return errors.New("prefix is required (the task id prefix, as in MKT-12)")
@@ -333,6 +339,17 @@ func (c *Config) validate() error {
 
 	if c.Branch == "" {
 		c.Branch = DefaultBranch
+	}
+
+	if c.URL != "" {
+		if !strings.HasPrefix(c.URL, "https://") && !strings.HasPrefix(c.URL, "http://") {
+			return fmt.Errorf("url: %q is not an http(s) url", c.URL)
+		}
+
+		// Without a placeholder every task would print the same url.
+		if !strings.Contains(c.URL, "{id}") && !strings.Contains(c.URL, "{number}") {
+			return fmt.Errorf("url: %q names neither {id} nor {number}", c.URL)
+		}
 	}
 
 	if c.Notion != nil {

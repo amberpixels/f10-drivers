@@ -76,6 +76,7 @@ Tokens refresh on their own; a missing or revoked login fails with a message poi
 ```toml
 prefix = "MKT"                    # task ids are MKT-<number>
 branch = "{id}/{slug}"            # {id}, {number}, {slug}
+# url = "https://app.notion.com/p/<workspace>/mkt-{number}"  # {id}, {number}; the page url when unset
 
 [notion]
 # transport = "mcp"               # "api" by default
@@ -100,6 +101,8 @@ high = ["High", "P1"]
 ```
 
 Only `prefix`, `notion.database` (or `data_source`) and `notion.properties.id` are required.
+`url` replaces Notion's long page url with a short link wherever a task's url is printed: `url` and the rows of `list`, `search` and `children`.
+It suits a database with a unique-ID property, which Notion serves at `/p/<workspace>/<prefix>-<number>`; the API never returns the workspace part, so the config spells it out.
 The driver checks the config against the database: unknown keys, missing or mistyped properties, `done` values that are not status options, or a `prefix` Notion does not use all fail with a message naming the problem.
 
 ### Verbs
@@ -107,7 +110,7 @@ The driver checks the config against the database: unknown keys, missing or mist
 | verb | answer |
 |---|---|
 | `read <n>` | title, status, priority, labels, assignee, the body as markdown, then page comments |
-| `url <n>` | the page url |
+| `url <n>` | the `url` template, filled, else the page url |
 | `search <q>` | tasks whose title contains `q` |
 | `list` | the first 100 open tasks |
 | `index` | the database url |

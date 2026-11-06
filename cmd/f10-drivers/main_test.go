@@ -2,6 +2,7 @@ package main_test
 
 import (
 	"bufio"
+	"encoding/json"
 	"flag"
 	"net/http"
 	"os"
@@ -182,6 +183,7 @@ func TestNotionWarnsOnTruncatedBody(t *testing.T) {
 func TestConfigErrors(t *testing.T) {
 	for _, tc := range []struct{ name, cfg, env, want string }{
 		{"unknown key", strings.Replace(notionConfig, "[notion]", "colour = \"red\"\n\n[notion]", 1), "", "unknown key colour"},
+		{"url without a placeholder", strings.Replace(notionConfig, "[notion]", "url = \"https://app.notion.com/p/workspace/mkt\"\n\n[notion]", 1), "", "names neither {id} nor {number}"},
 		{"bad level", strings.Replace(notionConfig, "urgent =", "critical =", 1), "", "notion.priority.critical"},
 		{"missing property", strings.Replace(notionConfig, "%s", `parent = "Mother"`, 1), "", `notion.properties.parent: the data source has no property "Mother"`},
 		{"wrong type", strings.Replace(notionConfig, "%s", `parent = "Tags"`, 1), "", `"Tags" is a multi_select property, want relation`},
@@ -869,6 +871,63 @@ func transports(t *testing.T, f func(t *testing.T, srv *notiontest.Server, run c
 		run, _, _ := mcpProject(t, srv, strings.Replace(mcpConfig, "%s", relations, 1), true)
 		f(t, srv, run)
 	})
+}
+
+// shortURL is a url template over the task number, as a workspace with a
+// unique-ID property serves its pages.
+const shortURL = `url = "https://app.notion.com/p/workspace/mkt-{number}"`
+
+// TestNotionURLTemplate pins that a configured url replaces the page url in
+// the url verb and in every row, over both ways in.
+func TestNotionURLTemplate(t *testing.T) {
+	withURL := func(cfg string) string {
+		return strings.Replace(strings.Replace(cfg, "%s", relations, 1), "[notion]", shortURL+"\n\n[notion]", 1)
+	}
+
+	runs := map[string]func(t *testing.T) conformance.Runner{
+		"api": func(t *testing.T) conformance.Runner { return project(t, withURL(notionConfig)) },
+		"mcp": func(t *testing.T) conformance.Runner {
+			run, _, _ := mcpProject(t, notiontest.New(t), withURL(mcpConfig), true)
+
+			return run
+		},
+	}
+
+	for name, newRun := range runs {
+		t.Run(name, func(t *testing.T) {
+			run := newRun(t)
+			conformance.Check(t, run, fixture)
+
+			res := run(t, "", "url", "3")
+			if res.Code != 0 || res.Stdout != "https://app.notion.com/p/workspace/mkt-3\n" {
+				t.Fatalf("url 3: exit %d, stdout %q, stderr %q", res.Code, res.Stdout, res.Stderr)
+			}
+
+			for _, args := range [][]string{{"list"}, {"search", "summary"}, {"children", "2"}} {
+				res := run(t, "", args...)
+				if res.Code != 0 {
+					t.Fatalf("%v: exit %d: %s", args, res.Code, res.Stderr)
+				}
+
+				var rows []contract.Row
+				if err := json.Unmarshal([]byte(res.Stdout), &rows); err != nil || len(rows) == 0 {
+					t.Fatalf("%v: %v, stdout %q", args, err, res.Stdout)
+				}
+
+				for _, r := range rows {
+					want := "https://app.notion.com/p/workspace/mkt-" + strings.TrimPrefix(r.ID, "MKT-")
+					if r.URL != want {
+						t.Errorf("%v: %s url = %q, want %q", args, r.ID, r.URL, want)
+					}
+				}
+			}
+
+			// The database url is no task's, so it stays Notion's.
+			if res := run(t, "", "index"); strings.Contains(res.Stdout, "/workspace/mkt-") {
+				t.Errorf("index took the task template: %q", res.Stdout)
+			}
+		})
+	}
 }
 
 // TestNotionUpdate sets every kind of property and reads them back.
