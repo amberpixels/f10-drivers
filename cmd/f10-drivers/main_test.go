@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"flag"
+	"maps"
 	"net/http"
 	"os"
 	"os/exec"
@@ -58,6 +59,7 @@ var fixture = conformance.Fixture{
 	Implements: []string{"create", "comment", "update"},
 	Update:     []string{"--status", "Done", "--set", "result=https://example.com/report", "--set", "due=2026-11-02"},
 	UpdateWant: []string{"Status: Done\n", "Result: https://example.com/report\n", "Due: 2026-11-02\n"},
+	After:      "3", Child: "1",
 }
 
 var binary string
@@ -1048,6 +1050,248 @@ func TestNotionUpdateRetriesServerErrors(t *testing.T) {
 				srv.Updates(),
 				res.Stderr,
 			)
+		}
+	})
+}
+
+// transportsWith is transports over a config of the test's own, with the
+// relations line put in place of %s.
+func transportsWith(t *testing.T, rel string, f func(t *testing.T, srv *notiontest.Server, run conformance.Runner)) {
+	t.Helper()
+
+	t.Run("api", func(t *testing.T) {
+		srv := notiontest.New(t)
+		f(t, srv, projectOn(t, srv, strings.Replace(notionConfig, "%s", rel, 1)))
+	})
+
+	t.Run("mcp", func(t *testing.T) {
+		srv := notiontest.New(t)
+		run, _, _ := mcpProject(t, srv, strings.Replace(mcpConfig, "%s", rel, 1), true)
+		f(t, srv, run)
+	})
+}
+
+// readAfters returns read's After: lines.
+func readAfters(t *testing.T, run conformance.Runner, number string) []string {
+	t.Helper()
+
+	res := run(t, "", "read", number)
+	if res.Code != 0 {
+		t.Fatalf("read %s: exit %d: %s", number, res.Code, res.Stderr)
+	}
+
+	var lines []string
+
+	for line := range strings.SplitSeq(res.Stdout, "\n") {
+		if strings.HasPrefix(line, "After:") {
+			lines = append(lines, line)
+		}
+	}
+
+	return lines
+}
+
+// TestNotionUpdateAfter sets, rewrites and drops the body's After: line,
+// with and without an after relation. An update that changes nothing sends
+// no edit.
+func TestNotionUpdateAfter(t *testing.T) {
+	for name, rel := range map[string]string{"relation": relations, "body only": `parent = "Parent"`} {
+		t.Run(name, func(t *testing.T) {
+			transportsWith(t, rel, func(t *testing.T, srv *notiontest.Server, run conformance.Runner) {
+				for _, tc := range []struct {
+					after string
+					want  []string
+					edits int
+				}{
+					{"2", []string{"After: MKT-2"}, 1},
+					{"1", []string{"After: MKT-1"}, 2},
+					{"1", []string{"After: MKT-1"}, 2},
+					{"", nil, 3},
+					{"", nil, 3},
+				} {
+					res := run(t, "", "update", "3", "--after", tc.after)
+					if res.Code != 0 || res.Stdout != "MKT-3\n" {
+						t.Fatalf(
+							"--after %q: exit %d, stdout %q, stderr %q",
+							tc.after,
+							res.Code,
+							res.Stdout,
+							res.Stderr,
+						)
+					}
+
+					if got := readAfters(t, run, "3"); !slices.Equal(got, tc.want) {
+						t.Fatalf("--after %q: read shows %q, want %q", tc.after, got, tc.want)
+					}
+
+					if srv.Edits() != tc.edits {
+						t.Fatalf("--after %q: %d body edit(s) sent, want %d", tc.after, srv.Edits(), tc.edits)
+					}
+				}
+			})
+		})
+	}
+}
+
+// TestNotionUpdateAfterAnchors appends an After: line to a body whose last
+// block also appears earlier, rewrites a linked one, and drops the only line.
+func TestNotionUpdateAfterAnchors(t *testing.T) {
+	transportsWith(t, `parent = "Parent"`, func(t *testing.T, srv *notiontest.Server, run conformance.Runner) {
+		for _, tc := range []struct{ body, after, wantEnd string }{
+			{"# T\n\n- one\n- two\n\n- one\n", "2", "- one\n- two\n\n- one\n\nAfter: MKT-2\n"},
+			{
+				"# T\n\nKeep this.\n\nAfter: [MKT-3: Book the venue](https://www.notion.so/mkt-3)\n", "2",
+				"Keep this.\n\nAfter: MKT-2\n",
+			},
+			{"# T\n\nAfter: MKT-3\n", "", ""},
+		} {
+			res := run(t, tc.body, "create")
+			if res.Code != 0 {
+				t.Fatalf("create: exit %d: %s", res.Code, res.Stderr)
+			}
+
+			number := strings.TrimPrefix(strings.TrimSpace(res.Stdout), "MKT-")
+
+			if res = run(t, "", "update", number, "--after", tc.after); res.Code != 0 {
+				t.Fatalf("update: exit %d: %s", res.Code, res.Stderr)
+			}
+
+			if tc.wantEnd == "" {
+				if got := readAfters(t, run, number); len(got) > 0 {
+					t.Fatalf("read still shows %q", got)
+				}
+
+				continue
+			}
+
+			if res = run(t, "", "read", number); !strings.HasSuffix(res.Stdout, tc.wantEnd) {
+				t.Fatalf("read should end with %q:\n%s", tc.wantEnd, res.Stdout)
+			}
+		}
+	})
+}
+
+// TestNotionUpdateAfterRejectsBeforeSending fails on a base that does not
+// exist and on a body Notion's export cut short, writing nothing.
+func TestNotionUpdateAfterRejectsBeforeSending(t *testing.T) {
+	for _, tc := range []struct{ number, after, want string }{
+		{"3", "99", "--after: MKT-99 not found"},
+		{"4", "2", "too long for Notion's markdown export"},
+	} {
+		t.Run(tc.want, func(t *testing.T) {
+			transports(t, func(t *testing.T, srv *notiontest.Server, run conformance.Runner) {
+				res := run(t, "", "update", tc.number, "--after", tc.after)
+				if res.Code != 1 || !strings.Contains(res.Stderr, tc.want) {
+					t.Fatalf("want exit 1 naming %q, got exit %d, stderr %q", tc.want, res.Code, res.Stderr)
+				}
+
+				if srv.Updates() != 0 || srv.Edits() != 0 {
+					t.Fatalf("%d update(s) and %d edit(s) sent, want none", srv.Updates(), srv.Edits())
+				}
+			})
+		})
+	}
+}
+
+// TestNotionUpdateAfterNeverRetriesAnEdit fails a body edit whose outcome is
+// unknown instead of sending it again: a retried append would match its own
+// anchor and write a second After: line.
+func TestNotionUpdateAfterNeverRetriesAnEdit(t *testing.T) {
+	srv := notiontest.New(t)
+	srv.EditStatus = 504
+	run := projectOn(t, srv, strings.Replace(notionConfig, "%s", `parent = "Parent"`, 1))
+
+	res := run(t, "", "update", "3", "--after", "2")
+	if res.Code != 1 || srv.Edits() != 1 || !strings.Contains(res.Stderr, "may have been rewritten") {
+		t.Fatalf("exit %d, %d edit(s), stderr %q", res.Code, srv.Edits(), res.Stderr)
+	}
+
+	if got := readAfters(t, run, "3"); !slices.Equal(got, []string{"After: MKT-2"}) {
+		t.Fatalf("read shows %q, want the one line the edit wrote", got)
+	}
+}
+
+// TestNotionMCPUpdateAfterNextToAnEmptyBlock edits against the body as the
+// MCP server holds it, empty blocks included, though read leaves them out.
+func TestNotionMCPUpdateAfterNextToAnEmptyBlock(t *testing.T) {
+	run, _, _ := mcpProject(t, notiontest.New(t), strings.Replace(mcpConfig, "%s", `parent = "Parent"`, 1), true)
+
+	res := run(t, "# T\n\nKeep this.\n<p/>\nAfter: MKT-3\n", "create")
+	if res.Code != 0 {
+		t.Fatalf("create: exit %d: %s", res.Code, res.Stderr)
+	}
+
+	number := strings.TrimPrefix(strings.TrimSpace(res.Stdout), "MKT-")
+
+	if res = run(t, "", "update", number, "--after", "2"); res.Code != 0 {
+		t.Fatalf("update: exit %d: %s", res.Code, res.Stderr)
+	}
+
+	if got := readAfters(t, run, number); !slices.Equal(got, []string{"After: MKT-2"}) {
+		t.Fatalf("read shows %q, want After: MKT-2", got)
+	}
+}
+
+// TestNotionUpdateParent moves a task under another parent and out from
+// under any, and declines without a parent property.
+func TestNotionUpdateParent(t *testing.T) {
+	transports(t, func(t *testing.T, _ *notiontest.Server, run conformance.Runner) {
+		lists := func(parent string) bool {
+			res := run(t, "", "children", parent)
+			if res.Code != 0 {
+				t.Fatalf("children %s: exit %d: %s", parent, res.Code, res.Stderr)
+			}
+
+			return strings.Contains(res.Stdout, `"id":"MKT-4"`)
+		}
+
+		if res := run(t, "", "update", "4", "--parent", "1"); res.Code != 0 || res.Stdout != "MKT-4\n" {
+			t.Fatalf("--parent 1: exit %d, stdout %q, stderr %q", res.Code, res.Stdout, res.Stderr)
+		}
+
+		if !lists("1") || lists("2") {
+			t.Fatal("MKT-4 should be a child of MKT-1 alone")
+		}
+
+		if res := run(t, "", "update", "4", "--parent", ""); res.Code != 0 {
+			t.Fatalf(`--parent "": exit %d: %s`, res.Code, res.Stderr)
+		}
+
+		if lists("1") || lists("2") {
+			t.Fatal("MKT-4 should have no parent")
+		}
+	})
+
+	run := project(t, strings.Replace(notionConfig, "%s", "", 1))
+	if res := run(t, "", "update", "4", "--parent", "1"); res.Code != contract.ExitUnsupported || res.Stdout != "" {
+		t.Fatalf("without a parent property: want exit %d, got exit %d, stderr %q",
+			contract.ExitUnsupported, res.Code, res.Stderr)
+	}
+}
+
+// TestNotionChildrenAfterFromBody reads each open subtask's base from its
+// body when no after relation is mapped.
+func TestNotionChildrenAfterFromBody(t *testing.T) {
+	transportsWith(t, `parent = "Parent"`, func(t *testing.T, _ *notiontest.Server, run conformance.Runner) {
+		if res := run(t, "", "update", "3", "--after", "1"); res.Code != 0 {
+			t.Fatalf("update: exit %d: %s", res.Code, res.Stderr)
+		}
+
+		res := run(t, "", "children", "2")
+
+		var rows []contract.ChildRow
+		if err := json.Unmarshal([]byte(res.Stdout), &rows); err != nil || res.Code != 0 {
+			t.Fatalf("children: exit %d, %v: %s", res.Code, err, res.Stdout)
+		}
+
+		got := map[string]string{}
+		for _, r := range rows {
+			got[r.ID] = r.After
+		}
+
+		// MKT-4's relation names MKT-3, but no after property is mapped to it.
+		if want := map[string]string{"MKT-3": "MKT-1", "MKT-4": "", "MKT-5": ""}; !maps.Equal(got, want) {
+			t.Fatalf("afters = %v, want %v", got, want)
 		}
 	})
 }

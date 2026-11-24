@@ -49,6 +49,9 @@ type Server struct {
 	// served.
 	UpdateStatus  int
 	CommentStatus int
+	// EditStatus, when set, answers the first REST body edit with this status
+	// after applying it, as a gateway timeout can.
+	EditStatus int
 
 	// RowLimit caps every rows-mode answer of the MCP face, which has no
 	// cursor, so a test can make it answer has_more.
@@ -60,6 +63,7 @@ type Server struct {
 	mu       sync.Mutex // guards pages, markdown and the counters, which writes change, and the MCP face's state
 	creates  int
 	updates  int
+	edits    int
 	posts    int
 	oauth    oauthState
 	calls    map[string]int
@@ -127,6 +131,14 @@ func (s *Server) Updates() int {
 	return s.updates
 }
 
+// Edits counts the body edits received over either face, answered or not.
+func (s *Server) Edits() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.edits
+}
+
 // Comments counts the comments received over either face, answered or not.
 func (s *Server) Comments() int {
 	s.mu.Lock()
@@ -173,6 +185,8 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		s.create(w, r)
 	case r.Method == http.MethodPatch && parts[0] == "pages" && len(parts) == 2:
 		s.update(w, r, id)
+	case r.Method == http.MethodPatch && parts[0] == "pages" && len(parts) == 3 && parts[2] == "markdown":
+		s.patchMarkdown(w, r, id)
 	case r.Method == http.MethodPost && parts[0] == "comments" && len(parts) == 1:
 		s.comment(w, r)
 	case r.Method == http.MethodGet && parts[0] == "users" && len(parts) == 1:
@@ -309,6 +323,93 @@ func (s *Server) update(w http.ResponseWriter, r *http.Request, id string) {
 
 	s.apply(p, set)
 	reply(w, p)
+}
+
+// patchMarkdown answers an update_content or replace_content body edit.
+func (s *Server) patchMarkdown(w http.ResponseWriter, r *http.Request, id string) {
+	var body struct {
+		Type          string `json:"type"`
+		UpdateContent struct {
+			ContentUpdates []struct {
+				OldStr string `json:"old_str"`
+				NewStr string `json:"new_str"`
+			} `json:"content_updates"`
+		} `json:"update_content"`
+		ReplaceContent struct {
+			NewStr *string `json:"new_str"`
+		} `json:"replace_content"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		apiError(w, http.StatusBadRequest, "invalid_json", err.Error())
+
+		return
+	}
+
+	var err error
+
+	switch {
+	case body.Type == "replace_content" && body.ReplaceContent.NewStr != nil:
+		err = s.editMarkdown(id, "", *body.ReplaceContent.NewStr, true)
+	case body.Type == "update_content" && len(body.UpdateContent.ContentUpdates) == 1:
+		u := body.UpdateContent.ContentUpdates[0]
+		err = s.editMarkdown(id, u.OldStr, u.NewStr, false)
+	default:
+		err = errors.New("the fake takes one update_content edit or a replace_content")
+	}
+
+	if errors.Is(err, errNoPage) {
+		notFound(w, id)
+
+		return
+	}
+
+	if err != nil {
+		apiError(w, http.StatusBadRequest, "validation_error", err.Error())
+
+		return
+	}
+
+	if s.EditStatus != 0 && s.edits == 1 {
+		apiError(w, s.EditStatus, "gateway_timeout", "Notion timed out.")
+
+		return
+	}
+
+	reply(w, s.markdown[norm(id)])
+}
+
+var errNoPage = errors.New("no such page")
+
+// editMarkdown replaces from in a page's body with to, under Notion's rules
+// for update_content: from is not empty and occurs exactly once. replace
+// writes to as the whole body instead.
+func (s *Server) editMarkdown(id, from, to string, replace bool) error {
+	s.edits++
+
+	md, ok := s.markdown[norm(id)].(map[string]any)
+	if !ok {
+		return errNoPage
+	}
+
+	body, _ := md["markdown"].(string)
+
+	switch {
+	case replace:
+		body = to
+	case from == "":
+		return errors.New("old_str must not be empty")
+	case strings.Count(body, from) == 0:
+		return fmt.Errorf("old_str matches no content: %q", from)
+	case strings.Count(body, from) > 1:
+		return fmt.Errorf("old_str matches %d locations: %q", strings.Count(body, from), from)
+	default:
+		body = strings.Replace(body, from, to, 1)
+	}
+
+	md["markdown"] = body
+
+	return nil
 }
 
 // apply stores response-shaped values on a page.

@@ -115,7 +115,7 @@ The driver checks the config against the database: unknown keys, missing or mist
 | `list` | the first 100 open tasks |
 | `index` | the database url |
 | `branch <n>` | the `branch` template, filled |
-| `children <n>` | tasks whose `parent` is this one |
+| `children <n>` | tasks whose `parent` is this one, each with its base from `after`, else from its body's closing `After:` line |
 | `create` | the new task's id, from `# <title>` and a markdown body on stdin |
 | `comment <n>` | the new comment's id, from markdown on stdin, posted as a page comment |
 | `update <n>` | the task's id, after setting the properties its flags name |
@@ -132,6 +132,13 @@ Over the API, read verbs also retry a transient 5xx.
 Every value is checked before the request, and unlike `create`, an unknown or unconfigured flag fails the update with nothing sent.
 The values are absolute, so `update` retries a 429 and a transient 5xx like a read.
 Over the API, `--assignee <email>` needs the integration's "read user information including email addresses" capability; a name matching several users fails naming them.
+
+`update <n> --parent <m>` sets the `parent` relation to task `m`, and `--parent ""` clears it.
+Without a `parent` property, it declines (exit 3).
+`update <n> --after <m>` rewrites the body's closing `After:` line to name task `m`, or adds one, and `--after ""` drops it.
+With an `after` property, it sets that relation too.
+The line is the record f10 reads the base from, so `--after` works without the relation.
+The body edit replaces only the text around the line, never the whole page, and a body Notion's markdown export cuts short fails the update instead.
 
 `comment` keeps paragraphs, links, bold, italic, strikethrough and inline code; headings, quotes, lists, tables and code blocks become plain text.
 Like `create`, it is one request, retried only on a 429: after a 5xx or a lost connection, check the task's comments before running it again.
@@ -150,6 +157,7 @@ On both transports, images stay links (f10 downloads them), a truncated body get
 ## Conformance
 
 `conformance.Check` runs every verb through a driver's process boundary and checks each answer against the contract, including a `create`, a `comment` and an `update`, each followed by a `read`, so point it at a fake or a scratch database.
+With `After` and `Child` set in the fixture, it also checks `update --after` and `update --parent`, each of which a driver may decline with exit 3.
 The Notion driver passes it over both transports, against the fakes in `notion/notiontest`. A new tracker passes its own fixtures to the same check.
 
 ## Development

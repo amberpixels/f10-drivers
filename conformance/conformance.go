@@ -6,6 +6,7 @@ package conformance
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -68,6 +69,10 @@ type Fixture struct {
 	// Update is the flags update sends to Task, and UpdateWant the text read
 	// must show after it; a driver that implements update needs both.
 	Update, UpdateWant []string
+	// After is a task Task can wait for, set and then cleared with update
+	// --after. Child is a task moved under Parent with update --parent. A
+	// driver may decline either with exit 3, as the contract allows.
+	After, Child string
 }
 
 // writeVerbs may be declined by any driver: f10 falls back without them.
@@ -160,6 +165,14 @@ func Check(t *testing.T, run Runner, fx Fixture) {
 		})
 	}
 
+	if fx.After != "" {
+		t.Run("update --after", func(t *testing.T) { checkAfter(t, run, fx) })
+	}
+
+	if fx.Child != "" {
+		t.Run("update --parent", func(t *testing.T) { checkParent(t, run, fx) })
+	}
+
 	t.Run("unknown verb declines", func(t *testing.T) {
 		if res := run(t, "", "frobnicate"); res.Code != contract.ExitUnsupported {
 			t.Fatalf("want exit %d for a verb outside the contract, got %d", contract.ExitUnsupported, res.Code)
@@ -172,6 +185,82 @@ func Check(t *testing.T, run Runner, fx Fixture) {
 			t.Fatalf("want a failure with stderr for a missing task, got exit %d, stderr %q", res.Code, res.Stderr)
 		}
 	})
+}
+
+// checkAfter sets Task's After: line to After and drops it again, reading
+// each back.
+func checkAfter(t *testing.T, run Runner, fx Fixture) {
+	t.Helper()
+
+	id := readID(t, run, fx.After)
+
+	for _, after := range []string{fx.After, ""} {
+		res := run(t, "", contract.VerbUpdate, fx.Task, "--after", after)
+		if res.Code == contract.ExitUnsupported {
+			return
+		}
+
+		if res.Code != 0 {
+			t.Fatalf("update %s --after %q: exit %d, stderr: %s", fx.Task, after, res.Code, res.Stderr)
+		}
+
+		res = run(t, "", contract.VerbRead, fx.Task)
+		if has := slices.ContainsFunc(strings.Split(res.Stdout, "\n"), namesAfter(id)); has != (after != "") {
+			t.Fatalf("after update --after %q, read should %sshow an After: line naming %s:\n%s",
+				after, map[bool]string{true: "", false: "not "}[after != ""], id, res.Stdout)
+		}
+	}
+}
+
+// namesAfter matches an After: line naming id, bare or as the link
+// `[<id>: <title>](<url>)` the contract also allows.
+func namesAfter(id string) func(string) bool {
+	return func(line string) bool {
+		v, ok := strings.CutPrefix(line, "After: ")
+
+		return ok && (v == id || strings.HasPrefix(v, "["+id+":"))
+	}
+}
+
+// checkParent moves Child under Parent and finds it among Parent's children.
+func checkParent(t *testing.T, run Runner, fx Fixture) {
+	t.Helper()
+
+	parent := cmp.Or(fx.Parent, fx.Task)
+
+	res := run(t, "", contract.VerbUpdate, fx.Child, "--parent", parent)
+	if res.Code == contract.ExitUnsupported {
+		return
+	}
+
+	if res.Code != 0 {
+		t.Fatalf("update %s --parent %s: exit %d, stderr: %s", fx.Child, parent, res.Code, res.Stderr)
+	}
+
+	id := readID(t, run, fx.Child)
+
+	var rows []contract.ChildRow
+
+	decodeArray(t, run(t, "", contract.VerbChildren, parent).Stdout, &rows)
+
+	if !slices.ContainsFunc(rows, func(r contract.ChildRow) bool { return r.ID == id }) {
+		t.Fatalf("children %s lacks %s after update --parent", parent, id)
+	}
+}
+
+// readID takes a task's id from the `# <id>: <title>` heading read prints.
+func readID(t *testing.T, run Runner, number string) string {
+	t.Helper()
+
+	res := run(t, "", contract.VerbRead, number)
+	heading, _, _ := strings.Cut(res.Stdout, "\n")
+
+	id, _, _ := strings.Cut(strings.TrimPrefix(heading, "# "), ":")
+	if res.Code != 0 || !idShape.MatchString(id) {
+		t.Fatalf("read %s: exit %d, want a `# <id>: <title>` heading, got %q", number, res.Code, heading)
+	}
+
+	return id
 }
 
 // The task Check creates; checkCreated reads its title and body back.

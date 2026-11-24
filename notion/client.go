@@ -188,7 +188,10 @@ type RichText struct {
 
 // Markdown is a page body as Notion renders it.
 type Markdown struct {
-	Markdown        string   `json:"markdown"`
+	Markdown string `json:"markdown"`
+	// Source is the body as a body edit matches it, when that differs from
+	// Markdown: the MCP face strips empty blocks from Markdown, not from Source.
+	Source          string   `json:"-"`
 	Truncated       bool     `json:"truncated"`
 	UnknownBlockIDs []string `json:"unknown_block_ids"`
 }
@@ -355,6 +358,41 @@ func (c *Client) UpdatePage(ctx context.Context, pageID string, props map[string
 	var updated Page
 
 	return c.do(ctx, http.MethodPatch, "/pages/"+pageID, nil, map[string]any{"properties": body}, &updated)
+}
+
+// EditMarkdown replaces the one occurrence of from in the page body with
+// to, or with from empty writes to as the whole body. No markdown_version
+// is sent, so the text matches what PageMarkdown read. An edit applied once
+// can still match again, as an append's anchor does, so it is sent as a
+// write: only a 429 is retried.
+func (c *Client) EditMarkdown(ctx context.Context, pageID, from, to string) error {
+	body := map[string]any{
+		"type":           "update_content",
+		"update_content": map[string]any{"content_updates": []any{map[string]any{"old_str": from, "new_str": to}}},
+	}
+	if from == "" {
+		body = map[string]any{"type": "replace_content", "replace_content": map[string]any{"new_str": to}}
+	}
+
+	var res struct {
+		Warnings []struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"warnings"`
+	}
+
+	if err := c.send(ctx, true, http.MethodPatch, "/pages/"+pageID+"/markdown", nil, body, &res); err != nil {
+		return err
+	}
+
+	// One edit sent, so a miss reported as a warning changed nothing.
+	for _, w := range res.Warnings {
+		if w.Code == "no_match" {
+			return fmt.Errorf("notion: the body changed before it could be edited: %s", w.Message)
+		}
+	}
+
+	return nil
 }
 
 // CreateComment posts markdown, converted to rich text, as a page-level

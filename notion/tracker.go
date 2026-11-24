@@ -69,6 +69,10 @@ type backend interface {
 	CreatePage(ctx context.Context, p Draft) (*Page, error)
 	// UpdatePage sets property values; it is absolute, so safe to retry.
 	UpdatePage(ctx context.Context, pageID string, props map[string]Value) error
+	// EditMarkdown replaces the one occurrence of from in the page body with
+	// to, or writes to as the whole body when from is empty. It is absolute,
+	// so safe to retry.
+	EditMarkdown(ctx context.Context, pageID, from, to string) error
 	// CreateComment posts a page-level comment and returns its id.
 	CreateComment(ctx context.Context, pageID, markdown string) (string, error)
 	// Users returns the workspace's people whose name or email holds query.
@@ -289,6 +293,14 @@ func (t *Tracker) Children(ctx context.Context, number string) ([]contract.Child
 		return nil, err
 	}
 
+	// Without the relation, the body's After: line is the only record of the base.
+	var afters []string
+	if t.props.After == "" {
+		if afters, err = t.bodyAfters(ctx, pages); err != nil {
+			return nil, err
+		}
+	}
+
 	children := make([]contract.ChildRow, 0, len(pages))
 
 	for i := range pages {
@@ -300,6 +312,10 @@ func (t *Tracker) Children(ctx context.Context, number string) ([]contract.Child
 		state := "open"
 		if t.n.IsDone(row.Status) {
 			state = "closed"
+		}
+
+		if afters != nil {
+			row.After = afters[i]
 		}
 
 		children = append(children, contract.ChildRow{
@@ -344,7 +360,9 @@ func (t *Tracker) Create(ctx context.Context, task contract.NewTask) (string, er
 
 // Update sets the given properties on a task and returns its id. Every
 // value is checked against the schema first, and a flag with no property to
-// go to fails: an update whose one change was dropped did nothing.
+// go to fails: an update whose one change was dropped did nothing. --after
+// rewrites the body's closing After: line, the record f10 reads the base
+// from, and sets the after relation too when one is configured.
 func (t *Tracker) Update(ctx context.Context, number string, u contract.TaskUpdate) (string, error) {
 	p, err := t.find(ctx, number)
 	if err != nil {
@@ -408,8 +426,62 @@ func (t *Tracker) Update(ctx context.Context, number string, u contract.TaskUpda
 		props[name] = v
 	}
 
-	if err := t.b.UpdatePage(ctx, p.ID, props); err != nil {
-		return "", err
+	if u.Parent != nil {
+		// The contract wants a tracker with no parent link to decline, not drop it.
+		if t.props.Parent == "" {
+			return "", contract.ErrUnsupported
+		}
+
+		v, err := t.relation(ctx, "parent", *u.Parent)
+		if err != nil {
+			return "", err
+		}
+
+		props[t.props.Parent] = v
+	}
+
+	var (
+		from, to string
+		editBody bool
+	)
+
+	if u.After != nil {
+		v, err := t.relation(ctx, "after", *u.After)
+		if err != nil {
+			return "", err
+		}
+
+		if t.props.After != "" {
+			props[t.props.After] = v
+		}
+
+		from, to, editBody, err = t.afterBodyEdit(ctx, p, *u.After)
+		if err != nil {
+			return "", err
+		}
+	}
+
+	// The body goes first because its After: line is what f10 reads the base
+	// from: a failure after it leaves only the relation behind.
+	if editBody {
+		err := t.b.EditMarkdown(ctx, p.ID, from, to)
+		if _, ok := errors.AsType[*UnknownOutcomeError](err); ok {
+			return "", fmt.Errorf(
+				"--after: %w; the After: line may have been rewritten: read %s before running update again",
+				err,
+				t.id(number),
+			)
+		}
+
+		if err != nil {
+			return "", fmt.Errorf("--after: rewriting the After: line of %s: %w", t.pageURL(p), err)
+		}
+	}
+
+	if len(props) > 0 {
+		if err := t.b.UpdatePage(ctx, p.ID, props); err != nil {
+			return "", err
+		}
 	}
 
 	return t.id(number), nil
@@ -429,6 +501,47 @@ func (t *Tracker) Comment(ctx context.Context, number, markdown string) (string,
 	}
 
 	return id, err
+}
+
+// relation is the relation value pointing at task number. For "" it is an
+// empty page list, which both ways in send as [], never null.
+func (t *Tracker) relation(ctx context.Context, flag, number string) (Value, error) {
+	if number == "" {
+		return Value{Type: "relation", Pages: []string{}}, nil
+	}
+
+	p, err := t.find(ctx, number)
+	if err != nil {
+		return Value{}, fmt.Errorf("--%s: %w", flag, err)
+	}
+
+	return Value{Type: "relation", Pages: []string{p.ID}}, nil
+}
+
+// afterBodyEdit reads p's body and works out the edit that makes its closing
+// After: line name task number, or drops it for "".
+func (t *Tracker) afterBodyEdit(ctx context.Context, p *Page, number string) (string, string, bool, error) {
+	md, err := t.b.PageMarkdown(ctx, p.ID)
+	if err != nil {
+		return "", "", false, err
+	}
+
+	// The cut part may hold the closing line, and an edit would add a second.
+	if md.Truncated {
+		return "", "", false, fmt.Errorf(
+			"--after: %s is too long for Notion's markdown export, so its After: line cannot be found; edit it in Notion",
+			t.pageURL(p),
+		)
+	}
+
+	id := ""
+	if number != "" {
+		id = t.id(number)
+	}
+
+	from, to, ok := afterEdit(cmp.Or(md.Source, md.Markdown), id)
+
+	return from, to, ok, nil
 }
 
 // draft reads the schema and checks every property value against it, all
@@ -746,32 +859,89 @@ func endsWithLine(text, line string) bool {
 	return strings.TrimSpace(text[strings.LastIndex(text, "\n")+1:]) == line
 }
 
-// namesAfter reports whether any line of body is an After: line naming id,
-// read as f10 reads it: any key case, the id bare or as a markdown link
-// whose text is "<id>: <title>".
+// namesAfter reports whether any line of body is an After: line naming id.
 func namesAfter(body, id string) bool {
 	for line := range strings.SplitSeq(body, "\n") {
-		if line == "" || line[0] == ' ' || line[0] == '\t' {
-			continue
-		}
-
-		key, value, ok := strings.Cut(line, ":")
-		if !ok || !strings.EqualFold(strings.Trim(key, "*` "), "after") {
-			continue
-		}
-
-		value = strings.Trim(value, "*` \t\r")
-		if text, ok := strings.CutPrefix(value, "["); ok && strings.Contains(text, "](") {
-			text, _, _ = strings.Cut(text, "](")
-			value, _, _ = strings.Cut(text, ":")
-		}
-
-		if strings.EqualFold(strings.TrimSpace(value), id) {
+		if v, ok := afterID(line); ok && strings.EqualFold(v, id) {
 			return true
 		}
 	}
 
 	return false
+}
+
+// afterID reads the task id from an After: line the way f10 reads one. The
+// key may be in any case, and the id bare or a markdown link whose text is
+// "<id>: <title>".
+func afterID(line string) (string, bool) {
+	if line == "" || line[0] == ' ' || line[0] == '\t' {
+		return "", false
+	}
+
+	key, value, ok := strings.Cut(line, ":")
+	if !ok || !strings.EqualFold(strings.Trim(key, "*` "), "after") {
+		return "", false
+	}
+
+	value = strings.Trim(value, "*` \t\r")
+	if text, ok := strings.CutPrefix(value, "["); ok && strings.Contains(text, "](") {
+		text, _, _ = strings.Cut(text, "](")
+		value, _, _ = strings.Cut(text, ":")
+	}
+
+	value = strings.TrimSpace(value)
+
+	return value, value != ""
+}
+
+// closingAfter returns the id the body's last non-blank line names when it
+// is an After: line.
+func closingAfter(body string) (string, bool) {
+	body = strings.TrimRight(body, " \t\r\n")
+
+	return afterID(body[strings.LastIndex(body, "\n")+1:])
+}
+
+// afterEdit works out the body edit that makes body end in "After: <id>", or
+// in no After: line for an empty id. It returns the text to replace (empty
+// for an empty body, written whole) and its replacement, and false when the
+// body already says what was asked.
+func afterEdit(body, id string) (string, string, bool) {
+	body = strings.TrimRight(body, " \t\r\n")
+	keep, line := body, ""
+
+	if current, has := closingAfter(body); has {
+		if id != "" && strings.EqualFold(current, id) {
+			return "", "", false
+		}
+
+		keep = strings.TrimRight(body[:strings.LastIndex(body, "\n")+1], "\n")
+		line = body[len(keep):]
+	} else if id == "" {
+		return "", "", false
+	}
+
+	from, to := line, ""
+	if id != "" {
+		to = "After: " + id
+		if keep != "" {
+			to = "\n\n" + to
+		}
+	}
+
+	if body == "" {
+		return "", to, true
+	}
+
+	// Notion edits only text that occurs once, so the anchor takes whole
+	// lines from the end of keep until it does.
+	for keep != "" && (from == "" || strings.HasPrefix(from, "\n") || strings.Count(body, from) != 1) {
+		cut := strings.LastIndex(strings.TrimRight(keep, "\n"), "\n") + 1
+		from, to = keep[cut:]+from, keep[cut:]+to
+		keep = keep[:cut]
+	}
+
+	return from, to, true
 }
 
 func (t *Tracker) rows(ctx context.Context, q Query) ([]contract.Row, error) {
@@ -1057,40 +1227,85 @@ func (t *Tracker) prefetchAfter(ctx context.Context, pages []Page) error {
 		}
 	}
 
+	var mu sync.Mutex
+
+	return fetchEach(missing, func(id string) error {
+		p, err := t.b.Page(ctx, id)
+
+		mu.Lock()
+		defer mu.Unlock()
+
+		switch {
+		case isNotFound(err):
+			t.ids[normalize(id)] = ""
+		case err != nil:
+			return err
+		default:
+			t.ids[normalize(id)] = t.taskID(p)
+		}
+
+		return nil
+	})
+}
+
+// fetchEach runs fetch on every item, fetchers at a time, and returns the
+// first error.
+func fetchEach[T any](items []T, fetch func(T) error) error {
 	var (
 		mu    sync.Mutex
 		wg    sync.WaitGroup
 		first error
-		next  = make(chan string)
+		next  = make(chan T)
 	)
 
-	for range min(fetchers, len(missing)) {
+	for range min(fetchers, len(items)) {
 		wg.Go(func() {
-			for id := range next {
-				p, err := t.b.Page(ctx, id)
-
-				mu.Lock()
-				switch {
-				case isNotFound(err):
-					t.ids[normalize(id)] = ""
-				case err != nil:
+			for item := range next {
+				if err := fetch(item); err != nil {
+					mu.Lock()
 					first = cmp.Or(first, err)
-				default:
-					t.ids[normalize(id)] = t.taskID(p)
+					mu.Unlock()
 				}
-				mu.Unlock()
 			}
 		})
 	}
 
-	for _, id := range missing {
-		next <- id
+	for _, item := range items {
+		next <- item
 	}
 
 	close(next)
 	wg.Wait()
 
 	return first
+}
+
+// bodyAfters reads the base of each open page from its body's closing After:
+// line, for a project that maps no after relation. Closed pages are skipped,
+// because f10 drops them and each read costs a request.
+func (t *Tracker) bodyAfters(ctx context.Context, pages []Page) ([]string, error) {
+	afters := make([]string, len(pages))
+
+	var open []int
+
+	for i := range pages {
+		if !t.n.IsDone(optionName(pages[i].Properties[t.props.Status])) {
+			open = append(open, i)
+		}
+	}
+
+	err := fetchEach(open, func(i int) error {
+		md, err := t.b.PageMarkdown(ctx, pages[i].ID)
+		if err != nil {
+			return err
+		}
+
+		afters[i], _ = closingAfter(md.Markdown) // each worker writes its own index
+
+		return nil
+	})
+
+	return afters, err
 }
 
 // idOf maps a related page to its task id, fetching it when this run has

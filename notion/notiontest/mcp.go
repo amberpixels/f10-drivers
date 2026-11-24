@@ -806,17 +806,22 @@ func (s *Server) getUsers(args map[string]any) any {
 }
 
 // updatePage answers update_properties with values in their SQLite form,
-// checked as createPages checks them.
+// checked as createPages checks them, and update_content or replace_content
+// as the REST face's body edit.
 func (s *Server) updatePage(args map[string]any) (any, error) {
-	if cmd, _ := args["command"].(string); cmd != "update_properties" {
-		return nil, fmt.Errorf("the fake updates properties only, got %q", cmd)
-	}
-
 	if args["allow_async"] != false {
 		return nil, errors.New("the fake updates synchronously only")
 	}
 
 	pid, _ := args["page_id"].(string)
+
+	switch cmd, _ := args["command"].(string); cmd {
+	case "update_properties":
+	case "update_content", "replace_content":
+		return s.mcpEdit(cmd, pid, args)
+	default:
+		return nil, fmt.Errorf("the fake does not take command %q", cmd)
+	}
 
 	p := s.pageByID(norm(pid))
 	if p == nil {
@@ -884,6 +889,40 @@ func (s *Server) updatePage(args map[string]any) (any, error) {
 	return map[string]any{"page_id": pid}, nil
 }
 
+// mcpEdit answers a body edit with the REST face's rules.
+func (s *Server) mcpEdit(cmd, pid string, args map[string]any) (any, error) {
+	var err error
+
+	if cmd == "replace_content" {
+		to, ok := args["new_str"].(string)
+		if !ok {
+			return nil, notionErrorf("replace_content needs new_str")
+		}
+
+		err = s.editMarkdown(norm(pid), "", to, true)
+	} else {
+		updates, _ := args["content_updates"].([]any)
+		if len(updates) != 1 {
+			return nil, fmt.Errorf("the fake takes one content update, got %d", len(updates))
+		}
+
+		u, _ := updates[0].(map[string]any)
+		from, _ := u["old_str"].(string)
+		to, _ := u["new_str"].(string)
+		err = s.editMarkdown(norm(pid), from, to, false)
+	}
+
+	if errors.Is(err, errNoPage) {
+		return nil, notionErrorf("Could not find page with ID: %s", pid)
+	}
+
+	if err != nil {
+		return nil, notionErrorf("%s", err.Error())
+	}
+
+	return map[string]any{"page_id": pid}, nil
+}
+
 // dateOf copies a page's date value, or an empty one.
 func (s *Server) dateOf(p page, name string) map[string]any {
 	props, _ := p["properties"].(map[string]any)
@@ -899,6 +938,10 @@ func (s *Server) dateOf(p page, name string) map[string]any {
 // sqliteToRequest turns a create's or an update's SQLite value into the
 // REST request shape respond checks.
 func sqliteToRequest(typ string, v any) (any, error) {
+	if v == nil && typ == "relation" {
+		return nil, errors.New("a relation clears with [], not null")
+	}
+
 	if v == nil {
 		return nil, nil
 	}
@@ -944,6 +987,20 @@ func sqliteToRequest(typ string, v any) (any, error) {
 
 		for _, item := range items {
 			out = append(out, map[string]any{"name": item})
+		}
+
+		return out, nil
+	case "relation":
+		items, ok := v.([]any)
+		if !ok {
+			return nil, fmt.Errorf("a relation takes an array, got %v", v)
+		}
+
+		out := make([]any, 0, len(items))
+
+		for _, item := range items {
+			id, _ := item.(string)
+			out = append(out, map[string]any{"id": dashed(norm(lastID.FindString(id)))})
 		}
 
 		return out, nil

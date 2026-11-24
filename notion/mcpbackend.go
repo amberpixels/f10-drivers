@@ -502,6 +502,36 @@ func (m *mcpBackend) UpdatePage(ctx context.Context, pageID string, props map[st
 	return nil
 }
 
+// EditMarkdown runs notion-update-page's update_content, or replace_content
+// with from empty, as the REST client edits the body, and as a write.
+func (m *mcpBackend) EditMarkdown(ctx context.Context, pageID, from, to string) error {
+	args := map[string]any{
+		"page_id":         dashed(pageID),
+		"command":         "update_content",
+		"content_updates": []any{map[string]any{"old_str": from, "new_str": to}},
+		"allow_async":     false,
+	}
+	if from == "" {
+		args = map[string]any{
+			"page_id":     dashed(pageID),
+			"command":     "replace_content",
+			"new_str":     to,
+			"allow_async": false,
+		}
+	}
+
+	var res json.RawMessage
+	if err := m.c.call(ctx, toolUpdate, args, true, &res); err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	delete(m.pages, normalize(pageID))
+	m.mu.Unlock()
+
+	return nil
+}
+
 // CreateComment runs notion-create-comment with the markdown converted to
 // rich text, as the REST transport sends it, so both post the same comment.
 func (m *mcpBackend) CreateComment(ctx context.Context, pageID, markdown string) (string, error) {
@@ -627,6 +657,7 @@ func (m *mcpBackend) fetchPage(ctx context.Context, id string) (*fetchedPage, er
 		page: *p,
 		md: Markdown{
 			Markdown:        emptyBlock.ReplaceAllString(section(res.Text, "content"), ""),
+			Source:          section(res.Text, "content"),
 			Truncated:       res.Truncated,
 			UnknownBlockIDs: res.UnknownBlockIDs,
 		},

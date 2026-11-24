@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -237,6 +238,50 @@ func TestServeUpdate(t *testing.T) {
 	}
 }
 
+// TestServeUpdateParentAndAfter parses --parent and --after, each alone a
+// valid update, with "" meaning clear rather than unset.
+func TestServeUpdateParentAndAfter(t *testing.T) {
+	for _, tc := range []struct {
+		args          []string
+		parent, after *string
+	}{
+		{[]string{"--after", "3"}, nil, new("3")},
+		{[]string{"--after", ""}, nil, new("")},
+		{[]string{"--after="}, nil, new("")},
+		{[]string{"--parent", "2"}, new("2"), nil},
+		{[]string{"--parent", ""}, new(""), nil},
+	} {
+		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
+			w := &writer{}
+
+			if err := contract.Serve(
+				t.Context(),
+				w,
+				"update",
+				append([]string{"4"}, tc.args...),
+				nil,
+				&bytes.Buffer{},
+			); err != nil {
+				t.Fatal(err)
+			}
+
+			if !equalPtr(w.update.Parent, tc.parent) || !equalPtr(w.update.After, tc.after) {
+				t.Fatalf("parent = %v, after = %v", deref(w.update.Parent), deref(w.update.After))
+			}
+		})
+	}
+}
+
+func equalPtr(a, b *string) bool { return (a == nil) == (b == nil) && (a == nil || *a == *b) }
+
+func deref(p *string) string {
+	if p == nil {
+		return "<unset>"
+	}
+
+	return fmt.Sprintf("%q", *p)
+}
+
 func TestServeWritesReject(t *testing.T) {
 	for _, tc := range []struct {
 		name, verb, stdin, want string
@@ -251,6 +296,8 @@ func TestServeWritesReject(t *testing.T) {
 		{"bad priority", "update", "", `--priority "p1" is not one of`, []string{"2", "--priority", "p1"}},
 		{"set without =", "update", "", `want key=value, got "due"`, []string{"2", "--set", "due"}},
 		{"set twice", "update", "", "due is set twice", []string{"2", "--set", "due=a", "--set", "due=b"}},
+		{"after id", "update", "", `--after needs a task number, got "MKT-3"`, []string{"2", "--after", "MKT-3"}},
+		{"parent id", "update", "", `--parent needs a task number, got "x"`, []string{"2", "--parent", "x"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := &writer{}

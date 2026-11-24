@@ -139,6 +139,9 @@ type TaskUpdate struct {
 	Labels   []string   // the full set, replacing the task's labels
 	Assignee string     // an email or a name
 	Set      []KeyValue // other properties, by the tracker's config key, in the order given
+	// Parent and After are task numbers, nil when not sent. An empty one
+	// clears the parent link or the body's After: line.
+	Parent, After *string
 }
 
 // KeyValue is one --set key=value.
@@ -148,7 +151,8 @@ type KeyValue struct {
 
 // Empty reports whether the update sets nothing.
 func (u TaskUpdate) Empty() bool {
-	return u.Status == "" && u.Priority == "" && len(u.Labels) == 0 && u.Assignee == "" && len(u.Set) == 0
+	return u.Status == "" && u.Priority == "" && len(u.Labels) == 0 && u.Assignee == "" && len(u.Set) == 0 &&
+		u.Parent == nil && u.After == nil
 }
 
 // Commenter is a Tracker that implements comment. A tracker without it
@@ -317,9 +321,10 @@ func parseComment(args []string, stdin io.Reader) (string, error) {
 // flag: an update whose one change was dropped did nothing.
 func parseUpdate(args []string) (TaskUpdate, error) {
 	var (
-		u      TaskUpdate
-		labels labelFlag
-		sets   setFlag
+		u             TaskUpdate
+		labels        labelFlag
+		sets          setFlag
+		parent, after string
 	)
 
 	fs := flag.NewFlagSet(VerbUpdate, flag.ContinueOnError)
@@ -329,6 +334,8 @@ func parseUpdate(args []string) (TaskUpdate, error) {
 	fs.Var(&labels, "label", "")
 	fs.StringVar(&u.Assignee, "assignee", "", "")
 	fs.Var(&sets, "set", "")
+	fs.StringVar(&parent, "parent", "", "")
+	fs.StringVar(&after, "after", "", "")
 
 	if err := fs.Parse(args); err != nil {
 		return u, fmt.Errorf("update: %w", err)
@@ -340,13 +347,29 @@ func parseUpdate(args []string) (TaskUpdate, error) {
 
 	u.Labels, u.Set = labels, sets
 
+	// A flag sent empty clears, so only Visit tells it from one not sent.
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "parent":
+			u.Parent = &parent
+		case "after":
+			u.After = &after
+		}
+	})
+
 	if u.Priority != "" && !IsPriority(u.Priority) {
 		return u, fmt.Errorf("update: --priority %q is not one of %s", u.Priority, strings.Join(Priorities, ", "))
 	}
 
+	for name, v := range map[string]string{"parent": parent, "after": after} {
+		if v != "" && !isNumber(v) {
+			return u, fmt.Errorf("update: --%s needs a task number, got %q", name, v)
+		}
+	}
+
 	if u.Empty() {
 		return u, errors.New(
-			"update sets nothing; give at least one of --status, --priority, --label, --assignee, --set",
+			"update sets nothing; give at least one of --status, --priority, --label, --assignee, --set, --parent, --after",
 		)
 	}
 
